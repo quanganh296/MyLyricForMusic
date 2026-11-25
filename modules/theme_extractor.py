@@ -60,6 +60,131 @@ class ThemeExtractor:
     }
 
     @classmethod
+    def is_browser_placeholder_icon(cls, source) -> bool:
+        """
+        Detects generic browser/transition icons sent by Windows GSMTC during tab or video switches
+        (such as the 4-color Google Chrome logo, Google 'G' icon, tiny favicons, or blank frames).
+        Returns True when the image should NOT be used as the video's Mode 1 background.
+        """
+        if source is None:
+            return True
+
+        try:
+            if isinstance(source, (bytes, bytearray)):
+                raw_img = Image.open(BytesIO(source))
+            elif isinstance(source, Image.Image):
+                raw_img = source
+            else:
+                raw_img = _pil_from_source(source)
+                if raw_img is None:
+                    return True
+
+            orig_w, orig_h = raw_img.size
+            if orig_w <= 0 or orig_h <= 0:
+                return True
+
+            # 1. Tiny browser favicons (16/32/48/64px) are never real video/album artwork
+            if max(orig_w, orig_h) <= 64:
+                return True
+
+            rgba = raw_img.convert("RGBA")
+            rgb = rgba.convert("RGB")
+
+            # 2. Blank / solid-color loading frames
+            tiny = rgb.resize((32, 32), Image.Resampling.BILINEAR)
+            tiny_px = list(tiny.getdata())
+            if tiny_px:
+                r_vals = [p[0] for p in tiny_px]
+                g_vals = [p[1] for p in tiny_px]
+                b_vals = [p[2] for p in tiny_px]
+                if max(max(r_vals) - min(r_vals), max(g_vals) - min(g_vals), max(b_vals) - min(b_vals)) < 12:
+                    return True
+
+            # 3. Square-ish icons: check for Chrome 4-color circular logo & Google 'G' logo
+            aspect = orig_w / max(1, orig_h)
+            if 0.80 <= aspect <= 1.25:
+                small = rgba.resize((64, 64), Image.Resampling.BILINEAR)
+                px = small.load()
+
+                # Auto-trim uniform or transparent outer padding (Chrome often centers its logo in a tile)
+                corners = [px[0, 0], px[63, 0], px[0, 63], px[63, 63]]
+                transparent_corners = sum(1 for c in corners if c[3] < 40)
+                white_corners = sum(1 for c in corners if c[3] >= 40 and c[0] > 230 and c[1] > 230 and c[2] > 230)
+                dark_corners = sum(1 for c in corners if c[3] >= 40 and c[0] < 35 and c[1] < 35 and c[2] < 35)
+
+                bg_ref = None
+                if transparent_corners >= 3:
+                    bg_ref = "transparent"
+                elif white_corners >= 3 or dark_corners >= 3:
+                    bg_ref = (
+                        sum(c[0] for c in corners) // 4,
+                        sum(c[1] for c in corners) // 4,
+                        sum(c[2] for c in corners) // 4,
+                    )
+
+                work = small
+                if bg_ref is not None:
+                    x0, y0, x1, y1 = 64, 64, -1, -1
+                    for y in range(64):
+                        for x in range(64):
+                            r, g, b, a = px[x, y]
+                            if bg_ref == "transparent":
+                                is_fg = (a >= 40)
+                            else:
+                                is_fg = (a >= 40) and (abs(r - bg_ref[0]) + abs(g - bg_ref[1]) + abs(b - bg_ref[2]) > 38)
+                            if is_fg:
+                                if x < x0: x0 = x
+                                if y < y0: y0 = y
+                                if x > x1: x1 = x
+                                if y > y1: y1 = y
+                    if x1 > x0 + 14 and y1 > y0 + 14:
+                        bw, bh = x1 - x0 + 1, y1 - y0 + 1
+                        if 0.78 <= (bw / bh) <= 1.28:
+                            work = small.crop((x0, y0, x1 + 1, y1 + 1)).resize((64, 64), Image.Resampling.BILINEAR)
+
+                wpx = work.load()
+
+                def _zone_hue_ratio(rx0, ry0, rx1, ry1, predicate):
+                    matched = 0
+                    opaque = 0
+                    for yy in range(ry0, ry1):
+                        for xx in range(rx0, rx1):
+                            r, g, b, a = wpx[xx, yy]
+                            if a < 40:
+                                continue
+                            opaque += 1
+                            h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+                            if predicate(h * 360.0, s, v):
+                                matched += 1
+                    return (matched / opaque) if opaque >= 12 else 0.0
+
+                is_blue = lambda h, s, v: 190.0 <= h <= 245.0 and s >= 0.38 and v >= 0.35
+                is_red = lambda h, s, v: (h <= 22.0 or h >= 338.0) and s >= 0.38 and v >= 0.35
+                is_green = lambda h, s, v: 95.0 <= h <= 165.0 and s >= 0.32 and v >= 0.30
+                is_yellow = lambda h, s, v: 26.0 <= h <= 68.0 and s >= 0.38 and v >= 0.45
+
+                # Chrome circular logo: Blue center, Red top, Green bottom-left, Yellow bottom-right
+                c_blue = _zone_hue_ratio(20, 20, 44, 44, is_blue)
+                t_red = _zone_hue_ratio(12, 2, 52, 24, is_red)
+                bl_green = _zone_hue_ratio(2, 26, 32, 62, is_green)
+                br_yellow = _zone_hue_ratio(32, 24, 62, 62, is_yellow)
+                if c_blue >= 0.16 and t_red >= 0.16 and bl_green >= 0.16 and br_yellow >= 0.16:
+                    return True
+
+                # Google 'G' logo: Red top, Yellow left, Green bottom, Blue right, with neutral/transparent corners
+                if transparent_corners >= 3 or white_corners >= 3 or dark_corners >= 3:
+                    g_red = _zone_hue_ratio(12, 0, 52, 22, is_red)
+                    g_yellow = _zone_hue_ratio(0, 14, 24, 50, is_yellow)
+                    g_green = _zone_hue_ratio(12, 42, 52, 64, is_green)
+                    g_blue = _zone_hue_ratio(34, 24, 64, 54, is_blue)
+                    if g_red >= 0.14 and g_yellow >= 0.14 and g_green >= 0.14 and g_blue >= 0.14:
+                        return True
+
+            return False
+        except Exception:
+            return False
+
+    @classmethod
     def extract_adaptive_palette(cls, source) -> dict:
         img = _pil_from_source(source)
         if img is None:

@@ -2,6 +2,7 @@ import asyncio
 import time
 from datetime import datetime, timezone
 from modules.qt_compat import QObject, Signal, QThread
+from modules.theme_extractor import ThemeExtractor
 
 try:
     from winsdk.windows.media.control import (
@@ -79,6 +80,10 @@ class MediaListenerWorker(QObject):
         self.current_title = None
         self.current_artist = None
         self.current_thumb_bytes = None
+        self.prev_track_thumb_bytes = None
+        self._thumb_track_time = 0.0
+        self._last_thumb_poll_time = 0.0
+        self._thumb_refresh_count = 0
         self.is_playing = False
         self.last_raw_pos = None
         self.last_upd_time = None
@@ -145,6 +150,8 @@ class MediaListenerWorker(QObject):
                         elif now - self.no_media_since > 5.0: # Grace period of 5 seconds before closing
                             self.current_title = None
                             self.current_artist = None
+                            self.current_thumb_bytes = None
+                            self.prev_track_thumb_bytes = None
                             self.last_active_media_state = None
                             self.session_closed.emit()
             except Exception as e:
@@ -281,13 +288,24 @@ class MediaListenerWorker(QObject):
             # 1. Song changed (or first startup)
             if title != self.current_title or artist != self.current_artist:
                 was_tracking_prev = (self.current_title is not None)
+                title_changed = (title != self.current_title)
                 prev_raw_pos = self.last_raw_pos
                 prev_upd_time = self.last_upd_time
+
+                if title_changed:
+                    self.prev_track_thumb_bytes = self.current_thumb_bytes
+                    self.current_thumb_bytes = None
+                    self._thumb_track_time = now
+                    self._last_thumb_poll_time = now
+                    self._thumb_refresh_count = 0
 
                 self.current_title = title
                 self.current_artist = artist
                 self.is_playing = win_is_playing
-                self.current_thumb_bytes = await self._read_thumbnail_bytes(best.get("thumbnail_ref"))
+                raw_thumb = await self._read_thumbnail_bytes(best.get("thumbnail_ref"))
+                valid_thumb = self._accept_gsmtc_thumbnail(raw_thumb)
+                if valid_thumb:
+                    self.current_thumb_bytes = valid_thumb
                 self.stale_upd_time = None
 
                 # Only reset stale position if switching from a previous song AND Chrome carried over the old timeline!
@@ -310,9 +328,24 @@ class MediaListenerWorker(QObject):
                 self.last_win_time = now
                 calc_position = true_pos
             else:
-                # 2. Same song: Use exact GSMTC wall-clock position when available, or extrapolate smoothly
-                if self.current_thumb_bytes is None and best.get("thumbnail_ref") is not None:
-                    self.current_thumb_bytes = await self._read_thumbnail_bytes(best.get("thumbnail_ref"))
+                # 2. Same song: Retry/refresh thumbnail briefly after switch in case Chrome sent its logo first
+                thumb_ref = best.get("thumbnail_ref")
+                if thumb_ref is not None:
+                    track_age = now - self._thumb_track_time
+                    if self.current_thumb_bytes is None:
+                        if (now - self._last_thumb_poll_time) >= 0.6 and track_age <= 8.0:
+                            self._last_thumb_poll_time = now
+                            raw_thumb = await self._read_thumbnail_bytes(thumb_ref)
+                            valid_thumb = self._accept_gsmtc_thumbnail(raw_thumb)
+                            if valid_thumb:
+                                self.current_thumb_bytes = valid_thumb
+                    elif self._thumb_refresh_count == 0 and 1.5 <= track_age <= 6.0:
+                        self._thumb_refresh_count = 1
+                        self._last_thumb_poll_time = now
+                        raw_thumb = await self._read_thumbnail_bytes(thumb_ref)
+                        valid_thumb = self._accept_gsmtc_thumbnail(raw_thumb)
+                        if valid_thumb and valid_thumb != self.current_thumb_bytes:
+                            self.current_thumb_bytes = valid_thumb
 
                 # Clear stale timeline lock as soon as Chrome emits a brand-new timeline update for this track
                 timeline_is_stale = (
@@ -360,6 +393,16 @@ class MediaListenerWorker(QObject):
             return state
         except Exception as e:
             return None
+
+    def _accept_gsmtc_thumbnail(self, raw_bytes: bytes):
+        """Rejects stale previous-song thumbnails and Chrome/Google transition logos."""
+        if not raw_bytes:
+            return None
+        if self.prev_track_thumb_bytes and raw_bytes == self.prev_track_thumb_bytes:
+            return None
+        if ThemeExtractor.is_browser_placeholder_icon(raw_bytes):
+            return None
+        return raw_bytes
 
     async def _read_thumbnail_bytes(self, thumb_ref) -> bytes:
         if not thumb_ref:

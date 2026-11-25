@@ -137,6 +137,11 @@ class LyricOverlayWindow(QWidget):
         self.current_line_index = -1
         self.current_video_id = None
         self.current_thumb_bytes = None
+        self._track_gen = 0
+        self._current_video_req_key = None
+        self._artwork_priority = 0  # 0=none, 1=valid GSMTC fallback, 2=YouTube HD artwork / video frame
+        self._last_gsmtc_thumb_bytes = None
+        self._prev_track_gsmtc_bytes = None
         self.adaptive_palette = ThemeExtractor.DEFAULT_PALETTE.copy()
         self.translation_worker = None
         self._old_trans_workers = []
@@ -177,7 +182,10 @@ class LyricOverlayWindow(QWidget):
             w.wait(200)
         self._old_trans_workers.clear()
         if hasattr(self, "video_display") and self.video_display:
-            self.video_display.stop_video()
+            self.video_display.stop_video(clear_artwork=True)
+            for r in list(getattr(self.video_display, "_old_resolvers", [])):
+                r.cancel()
+                r.wait(200)
         self.request_exit.emit()
         super().closeEvent(event)
 
@@ -385,6 +393,7 @@ class LyricOverlayWindow(QWidget):
         self.video_display = RoundedVideoDisplay(self.container)
         self.video_display.clicked.connect(lambda: self.media_listener.send_control("play_pause") if self.media_listener else None)
         self.video_display.artwork_ready.connect(self._on_hd_artwork_ready)
+        self.video_display.video_frame_artwork_ready.connect(self._on_video_frame_artwork_ready)
         self.content_row.addWidget(self.video_display, stretch=9)
 
         layout.addLayout(self.content_row, stretch=1)
@@ -626,44 +635,104 @@ class LyricOverlayWindow(QWidget):
         # Refresh lyric line visibility & text
         self._refresh_visible_lines()
 
+    def _reset_track_artwork(self, clear_display: bool = True):
+        """Clears previous track's blurred background & adaptive palette cleanly on song change."""
+        self._artwork_priority = 0
+        self.current_thumb_bytes = None
+        self._current_video_req_key = None
+        self.adaptive_palette = ThemeExtractor.DEFAULT_PALETTE.copy()
+        self.container.set_blurred_background(QPixmap())
+        self.video_display.set_border_color(QColor(255, 255, 255, 65))
+        if clear_display:
+            self.video_display.stop_video(clear_artwork=True)
+        if self.display_mode == 1:
+            self.apply_settings(self.settings)
+
+    def _maybe_apply_gsmtc_thumbnail(self, thumb_bytes: bytes):
+        """
+        Uses GSMTC thumbnail ONLY as a low-priority temporary fallback when no YouTube video artwork
+        is loaded yet, and NEVER allows Chrome/Google placeholder logos or stale previous-song artwork
+        to overwrite the real video background.
+        """
+        if not thumb_bytes:
+            return
+        if thumb_bytes == self._last_gsmtc_thumb_bytes:
+            return
+        self._last_gsmtc_thumb_bytes = thumb_bytes
+
+        # Never let GSMTC overwrite real YouTube HD artwork or decoded video frames
+        if self._artwork_priority >= 2:
+            return
+        # Never re-apply stale thumbnail carried over from the previous track
+        if self._prev_track_gsmtc_bytes and thumb_bytes == self._prev_track_gsmtc_bytes:
+            return
+        # Never apply Google Chrome logo / Google G / tiny browser favicon / blank frame
+        if ThemeExtractor.is_browser_placeholder_icon(thumb_bytes):
+            return
+
+        self.current_thumb_bytes = thumb_bytes
+        self._artwork_priority = 1
+        if self.display_mode == 1:
+            self._update_adaptive_theme_from_source(thumb_bytes)
+            if self.video_display.fallback_pixmap.isNull():
+                self.video_display.set_fallback_artwork(thumb_bytes)
+
     def _trigger_mode1_media_load(self):
         if self.display_mode != 1:
             return
-        if self.current_thumb_bytes:
-            self._update_adaptive_theme_from_bytes(self.current_thumb_bytes)
+        if self.current_thumb_bytes and self._artwork_priority >= 1 and self.container.bg_pixmap.isNull():
+            self._update_adaptive_theme_from_source(self.current_thumb_bytes)
 
+        req_token = str(self._track_gen)
         if self.current_media_state and self.current_media_state.title:
-            self.video_display.load_track(
+            self._current_video_req_key = self.video_display.load_track(
                 title=self.current_media_state.title,
                 artist=self.current_media_state.artist,
                 thumb_bytes=self.current_thumb_bytes,
                 video_id=self.current_video_id,
                 position_sec=self.current_media_state.get_current_position(),
-                is_playing=self.current_media_state.is_playing
+                is_playing=self.current_media_state.is_playing,
+                req_token=req_token,
             )
         elif self.current_lyrics and self.current_lyrics.get("title"):
-            self.video_display.load_track(
+            self._current_video_req_key = self.video_display.load_track(
                 title=self.current_lyrics.get("title", ""),
                 artist=self.current_lyrics.get("artist", ""),
                 thumb_bytes=self.current_thumb_bytes,
                 video_id=self.current_video_id,
                 position_sec=0.0,
-                is_playing=False
+                is_playing=False,
+                req_token=req_token,
             )
 
-    def _on_hd_artwork_ready(self, img_bytes: bytes):
-        if img_bytes:
-            self.current_thumb_bytes = img_bytes
-            if self.display_mode == 1:
-                self._update_adaptive_theme_from_bytes(img_bytes)
-
-    def _update_adaptive_theme_from_bytes(self, img_bytes: bytes):
+    def _on_hd_artwork_ready(self, req_key: str, img_bytes: bytes):
         if not img_bytes:
             return
-        palette = ThemeExtractor.extract_adaptive_palette(img_bytes)
+        if req_key and self._current_video_req_key and req_key != self._current_video_req_key:
+            return
+        self.current_thumb_bytes = img_bytes
+        self._artwork_priority = 2
+        if self.display_mode == 1:
+            self._update_adaptive_theme_from_source(img_bytes)
+
+    def _on_video_frame_artwork_ready(self, req_key: str, qimg):
+        if qimg is None or qimg.isNull():
+            return
+        if req_key and self._current_video_req_key and req_key != self._current_video_req_key:
+            return
+        if self._artwork_priority >= 2:
+            return
+        self._artwork_priority = 2
+        if self.display_mode == 1:
+            self._update_adaptive_theme_from_source(qimg)
+
+    def _update_adaptive_theme_from_source(self, source):
+        if source is None:
+            return
+        palette = ThemeExtractor.extract_adaptive_palette(source)
         self.adaptive_palette = palette
         blurred = ThemeExtractor.create_blurred_background(
-            img_bytes,
+            source,
             target_w=max(480, self.width()),
             target_h=max(270, self.height()),
             blur_radius=28,
@@ -675,6 +744,9 @@ class LyricOverlayWindow(QWidget):
         self.video_display.set_border_color(c)
         if self.display_mode == 1:
             self.apply_settings(self.settings)
+
+    def _update_adaptive_theme_from_bytes(self, img_bytes: bytes):
+        self._update_adaptive_theme_from_source(img_bytes)
 
     def zoom_lyrics(self, delta_px: int):
         """Mode 2 Zoom In / Zoom Out: scales font size and proportionally adjusts window dimensions."""
@@ -1256,8 +1328,10 @@ class LyricOverlayWindow(QWidget):
             self.lbl_next2.setText("")
             self.current_lyrics = None
             self.current_video_id = None
-            self.current_thumb_bytes = None
-            self.video_display.stop_video(clear_artwork=True)
+            self._track_gen += 1
+            self._prev_track_gsmtc_bytes = None
+            self._last_gsmtc_thumb_bytes = None
+            self._reset_track_artwork(clear_display=True)
             self._sync_surrounding_lines_visibility(has_foreign_sub=False)
             return
 
@@ -1271,21 +1345,37 @@ class LyricOverlayWindow(QWidget):
         info_text = f"{new_title} - {new_artist}" if new_artist else new_title
         self.lbl_song_info.setText(info_text)
 
-        # Capture GSMTC thumbnail bytes if fresh
-        if media_state.thumbnail_bytes and media_state.thumbnail_bytes != self.current_thumb_bytes:
-            self.current_thumb_bytes = media_state.thumbnail_bytes
-            if self.display_mode == 1:
-                self._update_adaptive_theme_from_bytes(self.current_thumb_bytes)
+        prev_req_title = self.current_lyrics.get("req_title") if self.current_lyrics else None
+        prev_req_artist = self.current_lyrics.get("req_artist", "") if self.current_lyrics else ""
+        song_changed = (
+            not self.current_lyrics
+            or prev_req_title != new_title
+            or (bool(prev_req_artist) and bool(new_artist) and prev_req_artist != new_artist)
+        )
 
-        if not self.current_lyrics or self.current_lyrics.get("req_title") != new_title:
+        if song_changed:
             print(f"[Overlay] Fetching lyrics for: {new_title} - {new_artist}")
 
-            self.current_line_index = -99
+            # Reset previous track's artwork immediately so old background or Chrome transition logo never sticks
+            self._track_gen += 1
+            self._prev_track_gsmtc_bytes = self._last_gsmtc_thumb_bytes
+            self._last_gsmtc_thumb_bytes = None
             self.current_video_id = None
+            self._reset_track_artwork(clear_display=True)
+
+            # Apply GSMTC thumbnail only if genuinely fresh and not a Chrome/Google logo
+            self._maybe_apply_gsmtc_thumbnail(media_state.thumbnail_bytes)
+
+            # Start fetching the real YouTube video & HD thumbnail in background immediately (in parallel with lyrics)
+            if self.display_mode == 1:
+                self._trigger_mode1_media_load()
+
+            self.current_line_index = -99
             track_dur = float(getattr(media_state, "duration", 0.0) or 0.0)
             lyrics_data = self.lyrics_provider.fetch_lyrics(new_title, new_artist, duration=track_dur)
             if lyrics_data:
                 lyrics_data["req_title"] = new_title
+                lyrics_data["req_artist"] = new_artist
                 self.current_lyrics = lyrics_data
                 self.current_video_id = lyrics_data.get("video_id")
                 self.settings["sync_offset"] = lyrics_data.get("sync_offset", 0.0)
@@ -1293,12 +1383,13 @@ class LyricOverlayWindow(QWidget):
                 self.settings["sync_offset"] = 0.0
                 self.current_lyrics = {
                     "req_title": new_title,
+                    "req_artist": new_artist,
                     "synced": False,
                     "lines": [{"time": 0.0, "text": "Không tìm thấy lời bài hát tự động. Nhấn nút kính lúp để tìm thủ công."}]
                 }
 
-            # Trigger Mode 1 video stream & blurred backdrop immediately
-            if self.display_mode == 1:
+            # If cached lyrics carried an explicit YouTube video_id, align Mode 1 to that exact video
+            if self.display_mode == 1 and self.current_video_id:
                 self._trigger_mode1_media_load()
 
             # Trigger async background auto-detection, romanization & translation
@@ -1310,10 +1401,16 @@ class LyricOverlayWindow(QWidget):
 
             # Snap immediately to the exact current playback line (including mid-song launches & auto-offset!)
             self.update_lyric_display()
+        else:
+            if self.current_lyrics and not prev_req_artist and new_artist:
+                self.current_lyrics["req_artist"] = new_artist
+            # Only consider GSMTC thumbnail while no higher-priority YouTube video artwork is loaded
+            self._maybe_apply_gsmtc_thumbnail(media_state.thumbnail_bytes)
 
     def set_custom_lyrics(self, lyrics_data: dict):
         if self.current_media_state:
             lyrics_data["req_title"] = self.current_media_state.title
+            lyrics_data["req_artist"] = (self.current_media_state.artist or "").strip()
         else:
             title = lyrics_data.get("title") or ""
             artist = lyrics_data.get("artist") or ""
@@ -1325,16 +1422,21 @@ class LyricOverlayWindow(QWidget):
         self.current_line_index = -99
 
         # If search came from a YouTube URL, load that exact video & thumbnail in Mode 1!
-        if lyrics_data.get("video_id"):
-            self.current_video_id = lyrics_data["video_id"]
+        custom_vid = lyrics_data.get("video_id")
         thumb_url = lyrics_data.get("thumbnail_url")
+        if custom_vid or thumb_url:
+            self._track_gen += 1
+            self._reset_track_artwork(clear_display=True)
+        if custom_vid:
+            self.current_video_id = custom_vid
         if thumb_url:
             try:
                 resp = requests.get(thumb_url, timeout=4)
                 if resp.status_code == 200 and len(resp.content) > 1500:
                     self.current_thumb_bytes = resp.content
+                    self._artwork_priority = 2
                     if self.display_mode == 1:
-                        self._update_adaptive_theme_from_bytes(self.current_thumb_bytes)
+                        self._update_adaptive_theme_from_source(self.current_thumb_bytes)
             except Exception:
                 pass
 

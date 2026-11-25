@@ -10,6 +10,7 @@ from modules.qt_compat import (
 
 class VideoStreamResolver(QThread):
     """Background worker that resolves a YouTube video ID and direct playable MP4 stream URL."""
+    artwork_fetched = Signal(str, bytes)     # req_key, thumb_bytes (emitted immediately before yt-dlp)
     resolved = Signal(str, str, str, bytes)  # req_key, video_id, stream_url, thumb_bytes
     failed = Signal(str, str)                # req_key, reason
 
@@ -45,7 +46,7 @@ class VideoStreamResolver(QThread):
         return None
 
     def _fetch_thumbnail_bytes(self, vid: str) -> bytes:
-        for quality in ("hqdefault.jpg", "mqdefault.jpg"):
+        for quality in ("maxresdefault.jpg", "hqdefault.jpg", "mqdefault.jpg"):
             try:
                 r = requests.get(f"https://i.ytimg.com/vi/{vid}/{quality}", timeout=5)
                 if r.status_code == 200 and len(r.content) > 2000:
@@ -68,6 +69,9 @@ class VideoStreamResolver(QThread):
         thumb_bytes = self._fetch_thumbnail_bytes(vid)
         if self._cancelled:
             return
+        if thumb_bytes:
+            # Deliver real HD YouTube thumbnail immediately (~0.3s) without waiting for yt-dlp!
+            self.artwork_fetched.emit(self.req_key, thumb_bytes)
 
         try:
             import yt_dlp
@@ -97,7 +101,6 @@ class VideoStreamResolver(QThread):
         except Exception as e:
             print(f"[VideoResolver yt-dlp Error] {e}")
             if not self._cancelled:
-                # Still pass thumbnail bytes via failed/fallback handling if needed
                 self.failed.emit(self.req_key, str(e))
 
 
@@ -108,7 +111,8 @@ class RoundedVideoDisplay(QWidget):
     inside WA_TranslucentBackground frameless windows.
     """
     clicked = Signal()
-    artwork_ready = Signal(bytes)  # Emitted when YouTube HD thumbnail is fetched
+    artwork_ready = Signal(str, bytes)              # req_key, thumb_bytes (HD YouTube thumbnail)
+    video_frame_artwork_ready = Signal(str, QImage) # req_key, decoded video frame fallback
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -123,7 +127,11 @@ class RoundedVideoDisplay(QWidget):
 
         self.current_req_key = None
         self.resolver = None
+        self._old_resolvers = []
         self.is_stream_loaded = False
+        self._has_hd_artwork = False
+        self._emitted_frame_artwork = False
+        self._frame_check_count = 0
         self.pending_seek_sec = 0.0
         self.pending_playing = False
 
@@ -143,6 +151,10 @@ class RoundedVideoDisplay(QWidget):
             self.player.mediaStatusChanged.connect(self._on_media_status_changed)
             self.player.errorOccurred.connect(self._on_player_error)
 
+    def _cleanup_old_resolver(self, resolver):
+        if resolver in self._old_resolvers:
+            self._old_resolvers.remove(resolver)
+
     def set_border_color(self, rgba_str_or_qcolor):
         if isinstance(rgba_str_or_qcolor, QColor):
             self.border_color = rgba_str_or_qcolor
@@ -156,16 +168,20 @@ class RoundedVideoDisplay(QWidget):
                 self.update()
 
     def load_track(self, title: str, artist: str = "", thumb_bytes: bytes = None,
-                   video_id: str = None, position_sec: float = 0.0, is_playing: bool = False):
-        req_key = f"{video_id or ''}|{title}|{artist}"
+                   video_id: str = None, position_sec: float = 0.0, is_playing: bool = False,
+                   req_token: str = ""):
+        req_key = f"{req_token}|{video_id or ''}|{title}|{artist}"
         if req_key == self.current_req_key and (self.is_stream_loaded or (self.resolver and self.resolver.isRunning())):
-            return
+            return req_key
 
-        self.stop_video(clear_artwork=False)
+        self.stop_video(clear_artwork=True)
         self.current_req_key = req_key
         self.pending_seek_sec = max(0.0, position_sec)
         self.pending_playing = is_playing
         self.is_stream_loaded = False
+        self._has_hd_artwork = False
+        self._emitted_frame_artwork = False
+        self._frame_check_count = 0
         self.current_frame_img = QImage()
 
         if thumb_bytes:
@@ -174,22 +190,32 @@ class RoundedVideoDisplay(QWidget):
         if not MULTIMEDIA_AVAILABLE or not title:
             self.status_text = ""
             self.update()
-            return
+            return req_key
 
         self.status_text = "Đang tải video..."
         self.update()
 
         self.resolver = VideoStreamResolver(req_key, title, artist, video_id=video_id, need_audio=False)
+        self.resolver.artwork_fetched.connect(self._on_artwork_fetched)
         self.resolver.resolved.connect(self._on_stream_resolved)
         self.resolver.failed.connect(self._on_stream_failed)
         self.resolver.start()
+        return req_key
+
+    def _on_artwork_fetched(self, req_key: str, thumb_bytes: bytes):
+        if req_key != self.current_req_key or not thumb_bytes:
+            return
+        self._has_hd_artwork = True
+        self.set_fallback_artwork(thumb_bytes)
+        self.artwork_ready.emit(req_key, thumb_bytes)
 
     def _on_stream_resolved(self, req_key: str, video_id: str, stream_url: str, thumb_bytes: bytes):
         if req_key != self.current_req_key:
             return
-        if thumb_bytes:
+        if thumb_bytes and not self._has_hd_artwork:
+            self._has_hd_artwork = True
             self.set_fallback_artwork(thumb_bytes)
-            self.artwork_ready.emit(thumb_bytes)
+            self.artwork_ready.emit(req_key, thumb_bytes)
 
         if self.player and stream_url:
             self.status_text = "Đang đệm video..."
@@ -229,6 +255,19 @@ class RoundedVideoDisplay(QWidget):
         self.is_stream_loaded = False
         self.update()
 
+    @staticmethod
+    def _is_non_black_frame(img: QImage) -> bool:
+        try:
+            tiny = img.scaled(16, 16).convertToFormat(QImage.Format.Format_RGB888)
+            ptr = tiny.bits()
+            ptr.setsize(tiny.sizeInBytes())
+            raw = bytes(ptr)
+            if not raw:
+                return False
+            return (sum(raw) / len(raw)) > 18.0
+        except Exception:
+            return True
+
     def _on_video_frame(self, frame):
         if frame.isValid():
             img = frame.toImage()
@@ -236,6 +275,12 @@ class RoundedVideoDisplay(QWidget):
                 self.current_frame_img = img
                 if self.status_text:
                     self.status_text = ""
+                if not self._has_hd_artwork and not self._emitted_frame_artwork and self.current_req_key:
+                    self._frame_check_count += 1
+                    if self._frame_check_count % 5 == 1 or self._frame_check_count >= 25:
+                        if self._frame_check_count >= 25 or self._is_non_black_frame(img):
+                            self._emitted_frame_artwork = True
+                            self.video_frame_artwork_ready.emit(self.current_req_key, img.copy())
                 self.update()
 
     def sync_to_media(self, position_sec: float, is_playing: bool):
@@ -262,19 +307,27 @@ class RoundedVideoDisplay(QWidget):
 
     def stop_video(self, clear_artwork: bool = False):
         if self.resolver:
-            self.resolver.cancel()
+            old_r = self.resolver
+            self.resolver = None
+            old_r.cancel()
             try:
-                self.resolver.resolved.disconnect()
-                self.resolver.failed.disconnect()
+                old_r.artwork_fetched.disconnect()
+                old_r.resolved.disconnect()
+                old_r.failed.disconnect()
             except Exception:
                 pass
-            self.resolver = None
+            if old_r.isRunning():
+                self._old_resolvers.append(old_r)
+                old_r.finished.connect(lambda r=old_r: self._cleanup_old_resolver(r))
 
         if self.player:
             self.player.stop()
             self.player.setSource(QUrl())
 
         self.is_stream_loaded = False
+        self._has_hd_artwork = False
+        self._emitted_frame_artwork = False
+        self._frame_check_count = 0
         self.current_frame_img = QImage()
         self.status_text = ""
         self.current_req_key = None

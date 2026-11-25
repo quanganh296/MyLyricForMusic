@@ -37,49 +37,7 @@
 
 ---
 
-## Dành Cho Lập Trình Viên (Chạy Từ Mã Nguồn)
 
-Nếu bạn muốn tự chỉnh sửa mã nguồn hoặc tự đóng gói lại `.exe`:
-
-```powershell
-git clone https://github.com/quanganh296/MyLyricForMusic.git
-cd MyLyricForMusic
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
-python app.py
-```
-
-Đóng gói lại thành file `.exe` đơn lẻ:
-
-```powershell
-.\.venv\Scripts\pyinstaller.exe LyricNow.spec --noconfirm
-```
-
-Tệp chạy sẽ nằm tại `dist\LyricNow.exe`.
-
----
-
-## Cấu Trúc Dự Án
-
-```text
-MyLyricForMusic/
-├── .github/workflows/
-│   └── release.yml           # Tự động build & đăng LyricNow.exe lên GitHub Releases
-├── assets/                   # Biểu tượng ứng dụng (.ico / .png)
-├── modules/
-│   ├── media_listener.py     # Lắng nghe bài hát & thời gian thực từ Windows GSMTC
-│   ├── lyrics_provider.py    # Tìm, xếp hạng & phân tích lời đồng bộ (ZingMP3 / LRCLIB / NetEase)
-│   ├── lyrics_translator.py  # Tự nhận diện ngôn ngữ, tạo phiên âm & dịch chạy ngầm
-│   ├── overlay_window.py     # Cửa sổ nổi Mode 1 (Video+Lyric) & Mode 2 (Lyric Only)
-│   ├── video_player.py       # Phát & đồng bộ video cho Mode 1
-│   ├── theme_extractor.py    # Tạo nền mờ video & tính màu chữ tương phản tự động
-│   ├── bt_battery_monitor.py # Đọc pin tai nghe Bluetooth (Trái / Phải / Tổng)
-│   ├── settings_dialog.py    # Bảng cài đặt giao diện, đồng bộ & ngôn ngữ dịch
-│   ├── search_dialog.py      # Tìm lời trực tuyến, theo link YouTube & dán lời thủ công
-│   ├── volume_manager.py     # Điều khiển âm lượng hệ thống Windows
-│   ├── icon_factory.py       # Bộ biểu tượng Font Awesome (QtAwesome)
-│   └── cache_manager.py      # Lưu đệm lời, độ lệch thời gian & bản dịch
 ├── app.py                    # Điểm khởi chạy ứng dụng
 ├── LyricNow.spec             # Cấu hình đóng gói PyInstaller
 ├── requirements.txt          # Danh sách thư viện Python

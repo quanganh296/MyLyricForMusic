@@ -82,6 +82,7 @@ class MediaListenerWorker(QObject):
         self.is_playing = False
         self.last_raw_pos = None
         self.last_upd_time = None
+        self.stale_upd_time = None
         self.last_win_pos = 0.0
         self.last_win_time = time.time()
         self.last_active_media_state = None
@@ -287,14 +288,21 @@ class MediaListenerWorker(QObject):
                 self.current_artist = artist
                 self.is_playing = win_is_playing
                 self.current_thumb_bytes = await self._read_thumbnail_bytes(best.get("thumbnail_ref"))
+                self.stale_upd_time = None
 
                 # Only reset stale position if switching from a previous song AND Chrome carried over the old timeline!
-                # On initial app startup (was_tracking_prev == False), ALWAYS honor the true mid-song position!
-                if was_tracking_prev and true_pos > 5.0:
+                # Also remember stale_upd_time so Tick 2+ do NOT re-apply the old track's age until Chrome sends a fresh timeline!
+                if was_tracking_prev and true_pos > 3.0:
                     stale_upd = (upd_time is not None and prev_upd_time is not None and upd_time == prev_upd_time)
-                    stale_pos = (prev_raw_pos is not None and abs(raw_pos - prev_raw_pos) < 1.5)
-                    if stale_upd or stale_pos:
+                    stale_pos = (prev_raw_pos is not None and abs(raw_pos - prev_raw_pos) < 1.5 and raw_pos > 3.0)
+                    old_upd_for_fresh_zero = (
+                        win_is_playing and raw_pos < 2.0 and upd_time is not None
+                        and getattr(upd_time, "year", 0) >= 2020
+                        and (datetime.now(timezone.utc) - upd_time).total_seconds() > 3.0
+                    )
+                    if stale_upd or stale_pos or old_upd_for_fresh_zero:
                         true_pos = 0.0
+                        self.stale_upd_time = upd_time
 
                 self.last_raw_pos = raw_pos
                 self.last_upd_time = upd_time
@@ -306,7 +314,16 @@ class MediaListenerWorker(QObject):
                 if self.current_thumb_bytes is None and best.get("thumbnail_ref") is not None:
                     self.current_thumb_bytes = await self._read_thumbnail_bytes(best.get("thumbnail_ref"))
 
-                if has_valid_upd:
+                # Clear stale timeline lock as soon as Chrome emits a brand-new timeline update for this track
+                timeline_is_stale = (
+                    self.stale_upd_time is not None
+                    and upd_time == self.stale_upd_time
+                    and raw_pos == self.last_raw_pos
+                )
+                if self.stale_upd_time is not None and not timeline_is_stale:
+                    self.stale_upd_time = None
+
+                if has_valid_upd and not timeline_is_stale:
                     # Exact drift-free position (handles continuous playback, pause, seek forward & seek back to 0:00!)
                     self.last_raw_pos = raw_pos
                     self.last_upd_time = upd_time
@@ -314,7 +331,7 @@ class MediaListenerWorker(QObject):
                     self.last_win_time = now
                     calc_position = true_pos
                 else:
-                    if raw_pos != self.last_raw_pos:
+                    if not timeline_is_stale and raw_pos != self.last_raw_pos:
                         self.last_raw_pos = raw_pos
                         self.last_win_pos = raw_pos
                         self.last_win_time = now

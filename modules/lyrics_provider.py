@@ -793,7 +793,10 @@ class LyricsProvider:
                 items = data.get("data", {}).get("items", [])
                 valid_sugs = []
                 norm_req_a = self._fold_latin(self._normalize_artist(req_artist))
-                req_is_remix = bool(re.search(r'(?i)\b(remix|bootleg|cover|live|lofi|slowed)\b', req_title or ""))
+                req_title_low = (req_title or "").lower()
+                req_is_remix = bool(re.search(r'(?i)\b(remix|bootleg|cover|live|lofi|slowed)\b', req_title_low))
+                req_wants_demo = bool(re.search(r'(?i)\bdemo\b', req_title_low))
+                req_wants_demo2 = bool(re.search(r'(?i)\bdemo\s*2\b', req_title_low))
 
                 for item in items:
                     for sug in item.get("suggestions", []):
@@ -810,13 +813,35 @@ class LyricsProvider:
                         sug_dur = float(sug.get("duration") or 0.0)
                         score = 0.0
 
-                        # Artist match bonus
-                        if norm_req_a and norm_req_a in self._fold_latin(artists):
+                        # Artist match bonus (check against both channel artist AND artist named in YouTube title)
+                        artists_f = self._fold_latin(artists)
+                        req_title_f = self._fold_latin(req_title)
+                        if norm_req_a and norm_req_a in artists_f:
                             score += 150.0
+                        elif artists_f and any(tok in req_title_f for tok in re.findall(r'[a-z0-9]{3,}', artists_f)):
+                            score += 110.0
+
                         # Skip unsolicited remix/bootleg/cover on ZingMP3 so LRCLIB can provide the real original track
                         sug_is_remix = bool(re.search(r'(?i)\b(remix|bootleg|cover|live|lofi|slowed)\b', res_title))
                         if sug_is_remix and not req_is_remix:
                             continue
+
+                        # Demo version alignment: '( Demo )' matches Demo / Demo 1 over Demo 2; non-demo prefers non-demo!
+                        sug_low = res_title.lower()
+                        sug_is_demo = bool(re.search(r'\bdemo\b', sug_low))
+                        sug_is_demo1 = bool(re.search(r'\bdemo\s*1\b', sug_low))
+                        sug_is_demo2 = bool(re.search(r'\bdemo\s*2\b', sug_low))
+                        if req_wants_demo:
+                            if req_wants_demo2:
+                                score += 90.0 if sug_is_demo2 else (-30.0 if sug_is_demo1 else 0.0)
+                            else:
+                                if sug_is_demo1 or (sug_is_demo and not sug_is_demo2):
+                                    score += 90.0
+                                elif sug_is_demo2:
+                                    score -= 50.0
+                        elif sug_is_demo:
+                            score -= 70.0
+
                         # Duration alignment
                         if duration > 30.0 and sug_dur > 30.0:
                             diff = abs(sug_dur - duration)

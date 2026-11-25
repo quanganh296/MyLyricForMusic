@@ -312,13 +312,49 @@ class LyricsProvider:
             cleaned = re.sub(r'(?i)\b' + re.escape(phrase) + r'\b', ' ', cleaned)
             cleaned = re.sub(r'(?i)\b' + re.escape(phrase.replace('/', r'\/')) + r'\b', ' ', cleaned)
 
-        # 6. Remove quotes and feat. suffix
+        # 6. Strip trailing Album / EP / Mixtape / Playlist tags (e.g. '| EP "Luv"', '- Album "..."')
+        cleaned = re.sub(r'(?i)(?:[\|\-–—\(\[]\s*)?\b(?:ep|album|mixtape|mini\s*album|playlist|tracklist)\b.*$', '', cleaned)
+
+        # 7. Remove quotes, feat. suffix, and leading track numbers (e.g. '3. ', '01 - ', 'Track 2:')
         cleaned = re.sub(r'[\"\'“”„‟‘’＂＇]', '', cleaned)
         cleaned = re.sub(r'\b(ft|feat|featuring)\.?\b.*$', '', cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r'\s+', ' ', cleaned)
-        # Strip leading/trailing separator junk like "+ |", "-", ":", "/", "•"
         cleaned = re.sub(r'^[-\|\:\+&·•—–｜：／\/\s]+|[-\|\:\+&·•—–｜：／\/\s]+$', '', cleaned)
+        cleaned = re.sub(r'^\s*(?:track\s*#?\s*)?\d{1,2}\s*[\.\)\-:]\s+', '', cleaned, flags=re.IGNORECASE)
         return cleaned.strip()
+
+    _VI_DIACRITIC_RE = re.compile(
+        r'[ăâđêôơưĂÂĐÊÔƠƯáàảãạắằẳẵặấầẩẫậéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]'
+    )
+    _FOREIGN_HINT_RE = re.compile(
+        r'(?i)(vietsub|nhạc\s*(?:hoa|trung|hàn|nhật|thái|nga)|tiếng\s*(?:hàn|nhật|trung|thái|nga)|'
+        r'korean|japanese|chinese|k-?pop|j-?pop|c-?pop|anime|ost)'
+    )
+    _EP_ALBUM_TAIL_RE = re.compile(
+        r'(?i)(?:[\|\-–—\(\[]\s*)?\b(?:ep|album|mixtape|mini\s*album|playlist|tracklist)\b.*$'
+    )
+
+    def _is_lyric_script_compatible(self, req_title: str, parsed_lines: list) -> bool:
+        """
+        Prevents a Vietnamese-titled song from accepting Korean/Japanese/Chinese lyrics
+        (e.g. '3. Nắng có mang em về | EP "Luv"' must never match Korean Apink 'LUV').
+        """
+        if not req_title or not parsed_lines:
+            return True
+        # Only enforce when the requested title is clearly Vietnamese (has VN diacritics, no CJK, no foreign hint)
+        if not self._VI_DIACRITIC_RE.search(req_title):
+            return True
+        if self._has_intl_script(req_title) or self._FOREIGN_HINT_RE.search(req_title):
+            return True
+
+        sample = "".join((l.get("text") or "") for l in parsed_lines[:15])
+        non_ws = re.sub(r'\s+', '', sample)
+        if len(non_ws) < 10:
+            return True
+        cjk_hits = len(self._INTL_SCRIPT_RE.findall(non_ws))
+        if cjk_hits >= 12 and (cjk_hits / len(non_ws)) >= 0.25:
+            return False
+        return True
 
     _CHANNEL_NOISE_RE = re.compile(
         r'(?i)\b(official|vevo|topic|music|channel|entertainment|records|tv|media|'
@@ -389,20 +425,20 @@ class LyricsProvider:
         return parts
 
     def _extract_song_segments(self, title: str, artist: str = "") -> list:
-        """Extracts likely song-title-only segments (excluding artist name and noise tags)."""
+        """Extracts likely song-title-only segments (excluding artist name, EP/Album tags, and noise)."""
         clean_t = self.clean_title(title)
+        title_no_meta = self._EP_ALBUM_TAIL_RE.sub("", title or "")
         norm_a = self._normalize_artist(artist)
         noise_upper = {"OFFICIAL", "MV", "AUDIO", "LYRIC", "LYRICS", "VIDEO", "M/V", "HD", "4K", "VIETSUB", "ENGSUB"}
 
         segs = []
-        # 1. Titles inside CJK brackets 「...」『...』《...》 or quotes '...' / "..."
-        for pat in [r'[「『《〈]([^」』》〉]{1,60})[」』》〉]', r"['\"“]([^'\"”]{2,60})['\"”]"]:
-            for m in re.findall(pat, title):
-                qc = self.clean_title(m)
-                if qc and not self._is_artist_part(qc, norm_a) and qc not in segs:
-                    segs.append(qc)
+        # 1. CJK title quotation brackets 「...」『...』《...》 (highest priority for JP/CN YouTube titles)
+        for m in re.findall(r'[「『《〈]([^」』》〉]{1,60})[」』》〉]', title_no_meta):
+            qc = self.clean_title(m)
+            if qc and not self._is_artist_part(qc, norm_a) and qc not in segs:
+                segs.append(qc)
 
-        # 2. Non-artist segments from spaced-separator split
+        # 2. Non-artist main segments from spaced-separator split (e.g. 'Nắng có mang em về', 'Đừng Làm Trái Tim Anh Đau')
         parts = self._split_title_segments(clean_t)
         non_artist = [
             p for p in parts
@@ -411,6 +447,16 @@ class LyricsProvider:
         for p in non_artist:
             if p not in segs:
                 segs.append(p)
+
+        # 3. ASCII/curly quoted titles ONLY after stripping EP/Album suffixes (e.g. TWICE "FANCY", BTS '봄날')
+        for m in re.findall(r"['\"“]([^'\"”]{2,60})['\"”]", title_no_meta):
+            qc = self.clean_title(m)
+            if not qc or self._is_artist_part(qc, norm_a) or qc in segs:
+                continue
+            # Avoid letting a stray 1-word ASCII quote override an existing multi-word Vietnamese main title
+            if segs and len(qc.split()) == 1 and not self._has_intl_script(qc) and self._VI_DIACRITIC_RE.search(segs[0]):
+                continue
+            segs.append(qc)
 
         return segs
 
@@ -662,7 +708,12 @@ class LyricsProvider:
                 cached_dur = float(cached_data.get("track_duration") or 0.0)
                 dur_changed = (duration > 30.0 and cached_dur > 30.0 and abs(duration - cached_dur) > 15.0)
                 cached_title_ok = is_manual or self.is_valid_match(title, cached_data.get("title", ""), req_artist=clean_a)
-                if cached_title_ok and (is_manual or (cached_data.get("has_real_timestamps", False) and not dur_changed)):
+                cached_script_ok = is_manual or self._is_lyric_script_compatible(title, cached_data.get("lines") or [])
+                req_is_remix = bool(re.search(r'(?i)\b(remix|bootleg|cover|live|lofi|slowed)\b', title or ""))
+                cached_unwanted_remix = (not is_manual) and (not req_is_remix) and bool(
+                    re.search(r'(?i)\b(remix|bootleg|cover|lofi|slowed)\b', str(cached_data.get("title") or ""))
+                )
+                if cached_title_ok and cached_script_ok and (not cached_unwanted_remix) and (is_manual or (cached_data.get("has_real_timestamps", False) and not dur_changed)):
                     # If cached entry has no user-saved offset yet, still check intro-trim alignment
                     if "sync_offset" not in cached_data and duration > 30.0:
                         self._apply_auto_intro_offset(cached_data, duration)
@@ -678,7 +729,7 @@ class LyricsProvider:
 
         if is_intl:
             # Pass 1 (SYNCED ONLY): LRCLIB Exact -> LRCLIB Search (ranked!) -> NetEase CloudSearch -> ZingMP3
-            data, pf = self._fetch_lrclib_exact(exact_title_query, norm_a or clean_a, duration=duration, require_synced=True)
+            data, pf = self._fetch_lrclib_exact(exact_title_query, norm_a or clean_a, duration=duration, require_synced=True, req_title=title)
             if pf and not plain_fallback:
                 plain_fallback = pf
 
@@ -706,7 +757,7 @@ class LyricsProvider:
                 if data:
                     break
             if not data:
-                data, pf = self._fetch_lrclib_exact(exact_title_query, norm_a or clean_a, duration=duration, require_synced=True)
+                data, pf = self._fetch_lrclib_exact(exact_title_query, norm_a or clean_a, duration=duration, require_synced=True, req_title=title)
                 if pf and not plain_fallback:
                     plain_fallback = pf
             if not data:
@@ -784,7 +835,7 @@ class LyricsProvider:
                     if l_resp.status_code == 200 and l_resp.content:
                         lrc_text = l_resp.content.decode("utf-8", errors="replace").lstrip("\ufeff")
                         parsed = self.parse_lrc(lrc_text)
-                        if parsed:
+                        if parsed and self._is_lyric_script_compatible(req_title, parsed):
                             return {
                                 "title": res_title,
                                 "artist": artists,
@@ -798,7 +849,7 @@ class LyricsProvider:
             print(f"[ZingMP3 Error] {e}")
         return None
 
-    def _fetch_lrclib_exact(self, title: str, artist: str, duration: float = 0.0, require_synced: bool = False):
+    def _fetch_lrclib_exact(self, title: str, artist: str, duration: float = 0.0, require_synced: bool = False, req_title: str = ""):
         """Returns (synced_result_or_none, plain_fallback_or_none)."""
         try:
             params = {"track_name": title}
@@ -813,9 +864,10 @@ class LyricsProvider:
                 plain = res.get("plainLyrics")
                 res_dur = float(res.get("duration") or 0.0)
                 dur_val = duration if (duration and duration > 30.0) else (res_dur or 210.0)
+                check_t = req_title or title
                 if synced:
                     parsed = self.parse_lrc(synced, duration=dur_val)
-                    if parsed:
+                    if parsed and self._is_lyric_script_compatible(check_t, parsed):
                         synced_dict = {
                             "title": res.get("trackName", title),
                             "artist": res.get("artistName", artist),
@@ -832,16 +884,17 @@ class LyricsProvider:
                         return synced_dict, None
                 if plain:
                     parsed = self.parse_lrc(plain, duration=dur_val)
-                    plain_dict = {
-                        "title": res.get("trackName", title),
-                        "artist": res.get("artistName", artist),
-                        "synced": True,
-                        "has_real_timestamps": False,
-                        "plain": plain,
-                        "lines": parsed,
-                        "source": "LRCLIB Exact (Plain)"
-                    }
-                    return (None if require_synced else plain_dict), plain_dict
+                    if parsed and self._is_lyric_script_compatible(check_t, parsed):
+                        plain_dict = {
+                            "title": res.get("trackName", title),
+                            "artist": res.get("artistName", artist),
+                            "synced": True,
+                            "has_real_timestamps": False,
+                            "plain": plain,
+                            "lines": parsed,
+                            "source": "LRCLIB Exact (Plain)"
+                        }
+                        return (None if require_synced else plain_dict), plain_dict
         except Exception as e:
             print(f"[LRCLIB Exact Error] {e}")
         return None, None
@@ -872,7 +925,7 @@ class LyricsProvider:
                         synced = item.get("syncedLyrics")
                         if synced:
                             parsed = self.parse_lrc(synced, duration=dur_for_parse)
-                            if parsed:
+                            if parsed and self._is_lyric_script_compatible(req_title, parsed):
                                 sc = self._score_lyric_lines(
                                     parsed, True, item_dur, duration,
                                     req_title, req_artist, res_t, res_a
@@ -893,7 +946,7 @@ class LyricsProvider:
                         plain = item.get("plainLyrics")
                         if plain:
                             parsed = self.parse_lrc(plain, duration=dur_for_parse)
-                            if parsed:
+                            if parsed and self._is_lyric_script_compatible(req_title, parsed):
                                 sc = self._score_lyric_lines(
                                     parsed, False, item_dur, duration,
                                     req_title, req_artist, res_t, res_a
@@ -953,7 +1006,7 @@ class LyricsProvider:
                         lrc_text = l_data["lrc"].get("lyric", "")
                         if lrc_text and "[" in lrc_text:
                             parsed = self.parse_lrc(lrc_text)
-                            if parsed and len(parsed) >= 5:
+                            if parsed and len(parsed) >= 5 and self._is_lyric_script_compatible(req_title, parsed):
                                 return {
                                     "title": song_name,
                                     "artist": artists,

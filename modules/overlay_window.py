@@ -1256,7 +1256,9 @@ class LyricOverlayWindow(QWidget):
             return
 
         req_title = self.current_lyrics.get("req_title") or self.current_lyrics.get("title") or ""
-        req_key = f"{req_title}|{len(lines)}|{target_lang}|rm"
+        first_txt = (lines[0].get("text") or "")[:24]
+        last_txt = (lines[-1].get("text") or "")[:24]
+        req_key = f"{req_title}|{len(lines)}|{first_txt}|{last_txt}|{target_lang}|rm"
         if self.translation_worker and self.translation_worker.isRunning() and self.current_trans_req_key == req_key:
             return
 
@@ -1408,18 +1410,35 @@ class LyricOverlayWindow(QWidget):
             self._maybe_apply_gsmtc_thumbnail(media_state.thumbnail_bytes)
 
     def set_custom_lyrics(self, lyrics_data: dict):
-        if self.current_media_state:
-            lyrics_data["req_title"] = self.current_media_state.title
-            lyrics_data["req_artist"] = (self.current_media_state.artist or "").strip()
+        if not lyrics_data or not lyrics_data.get("lines"):
+            return
+
+        lyrics_data = dict(lyrics_data)
+        if self.current_media_state and self.current_media_state.title:
+            req_title = (self.current_media_state.title or "").strip()
+            req_artist = (self.current_media_state.artist or "").strip()
+            lyrics_data["req_title"] = req_title
+            lyrics_data["req_artist"] = req_artist
         else:
-            title = lyrics_data.get("title") or ""
-            artist = lyrics_data.get("artist") or ""
+            title = (lyrics_data.get("title") or "").strip()
+            artist = (lyrics_data.get("artist") or "").strip()
             if title:
                 info_text = f"{title} - {artist}" if artist else f"{title}"
                 self.lbl_song_info.setText(info_text)
 
         self.current_lyrics = lyrics_data
         self.current_line_index = -99
+        self.settings["sync_offset"] = float(lyrics_data.get("sync_offset", 0.0) or 0.0)
+
+        # Persist manually chosen lyric for the currently playing track so it sticks across replays
+        try:
+            if self.current_media_state and self.current_media_state.title and self.lyrics_provider and self.lyrics_provider.cache:
+                clean_t = self.lyrics_provider.clean_title(self.current_media_state.title.strip())
+                clean_a = (self.current_media_state.artist or "").strip()
+                if clean_t:
+                    self.lyrics_provider.cache.set(clean_t, clean_a, self.current_lyrics)
+        except Exception:
+            pass
 
         # If search came from a YouTube URL, load that exact video & thumbnail in Mode 1!
         custom_vid = lyrics_data.get("video_id")
@@ -1440,7 +1459,7 @@ class LyricOverlayWindow(QWidget):
             except Exception:
                 pass
 
-        if self.display_mode == 1:
+        if self.display_mode == 1 and (custom_vid or thumb_url or not self.current_media_state):
             self._trigger_mode1_media_load()
 
         # Trigger async romanization & translation for manually selected / pasted lyrics
@@ -1451,7 +1470,10 @@ class LyricOverlayWindow(QWidget):
         self._trigger_translation_if_needed()
 
         lines = self.current_lyrics.get("lines", [])
-        if lines and not self.current_media_state:
+        if self.current_media_state:
+            # Immediately snap overlay text to the newly chosen lyrics (even if music is paused!)
+            self.update_lyric_display()
+        elif lines:
             self.lbl_prev2.setText("")
             self.lbl_prev.setText("")
             self.lbl_active.setText(lines[0]["text"])

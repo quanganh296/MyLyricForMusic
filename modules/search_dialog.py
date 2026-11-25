@@ -1,3 +1,4 @@
+import re
 import requests
 from modules.qt_compat import (
     QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
@@ -338,6 +339,46 @@ class SearchDialog(QDialog):
         else:
             QMessageBox.information(self, "Thông báo", "Clipboard hiện đang trống. Hãy sao chép link video YouTube trước!")
 
+    @staticmethod
+    def _format_duration(dur) -> str:
+        try:
+            sec = int(round(float(dur or 0)))
+            if sec > 0:
+                return f"{sec // 60:02d}:{sec % 60:02d}"
+        except Exception:
+            pass
+        return "--:--"
+
+    @staticmethod
+    def _extract_preview(item_data: dict) -> str:
+        raw = item_data.get("syncedLyrics") or item_data.get("plainLyrics") or ""
+        if not raw or str(raw).startswith("http"):
+            return ""
+        preview_lines = []
+        for ln in str(raw).splitlines():
+            clean = re.sub(r'\[[^\]]*\]|<\d+:\d+(?:[\.:]\d+)?>', '', ln).strip()
+            if clean and len(clean) >= 2:
+                preview_lines.append(clean)
+            if len(preview_lines) >= 2:
+                break
+        if not preview_lines:
+            return ""
+        joined = " / ".join(preview_lines)
+        return (joined[:78] + "...") if len(joined) > 80 else joined
+
+    def _format_candidate_text(self, r: dict) -> str:
+        sync_tag = "Khớp thời gian" if r.get("synced") else "Lời thường"
+        title = r.get("trackName") or "Unknown Title"
+        artist = r.get("artistName") or "Unknown Artist"
+        source = r.get("source") or "Online"
+        dur_str = self._format_duration(r.get("duration"))
+        preview = self._extract_preview(r)
+        header = f"{title} - {artist}  [{dur_str}]  [{sync_tag} | {source}]"
+        if preview:
+            return f"{header}\n\"{preview}\""
+        album = r.get("albumName") or source
+        return f"{header}\nNguồn: {source} | Album: {album}"
+
     def do_search(self):
         query = self.query_input.text().strip()
         if not query:
@@ -373,13 +414,7 @@ class SearchDialog(QDialog):
             return
 
         for r in results:
-            sync_tag = "[Lời khớp thời gian (Synced)]" if r["synced"] else "[Lời bài hát thường (Plain)]"
-            title = r.get("trackName") or "Unknown Title"
-            artist = r.get("artistName") or "Unknown Artist"
-            album = r.get("albumName") or ""
-            
-            display_text = f"{title} - {artist} {sync_tag}\nAlbum: {album}"
-            item = QListWidgetItem(display_text)
+            item = QListWidgetItem(self._format_candidate_text(r))
             item.setData(Qt.ItemDataRole.UserRole, r)
             self.result_list.addItem(item)
 
@@ -445,22 +480,19 @@ class SearchDialog(QDialog):
             return
 
         for r in candidates:
-            sync_tag = "[Lời khớp thời gian (Synced)]" if r["synced"] else "[Lời bài hát thường (Plain)]"
-            title = r.get("trackName") or "Unknown Title"
-            artist = r.get("artistName") or "Unknown Artist"
-            album = r.get("albumName") or ""
-            source = r.get("source") or "Online"
-            
-            display_text = f"{title} - {artist} {sync_tag}\nNguồn: {source} | Album: {album}"
-            item = QListWidgetItem(display_text)
+            item = QListWidgetItem(self._format_candidate_text(r))
             item.setData(Qt.ItemDataRole.UserRole, r)
             self.yt_result_list.addItem(item)
 
     def on_quick_apply_clicked(self):
-        if not self.yt_direct_lyric:
+        if not self.yt_direct_lyric or not self.yt_direct_lyric.get("lines"):
+            QMessageBox.warning(self, "Chú ý", "Lời bài hát trực tiếp bị trống. Vui lòng chọn một phiên bản khác trong danh sách!")
             return
 
         data = self.yt_direct_lyric.copy()
+        src = str(data.get("source") or "Online")
+        if "Manual" not in src and "Custom" not in src:
+            data["source"] = f"Manual YouTube ({src})"
         if self.yt_current_info:
             data["video_id"] = self.yt_current_info.get("video_id")
             data["thumbnail_url"] = self.yt_current_info.get("thumbnail")
@@ -475,31 +507,34 @@ class SearchDialog(QDialog):
         self.accept()
 
     def on_item_selected(self, item):
-        self.on_apply_clicked()
+        self._apply_from_list(self.result_list, is_yt_tab=False, explicit_item=item)
 
     def on_yt_item_selected(self, item):
-        self.on_apply_yt_clicked()
+        self._apply_from_list(self.yt_result_list, is_yt_tab=True, explicit_item=item)
 
     def on_apply_clicked(self):
-        self._apply_from_list(self.result_list)
+        self._apply_from_list(self.result_list, is_yt_tab=False)
 
     def on_apply_yt_clicked(self):
         self._apply_from_list(self.yt_result_list, is_yt_tab=True)
 
-    def _apply_from_list(self, list_widget: QListWidget, is_yt_tab: bool = False):
-        selected_items = list_widget.selectedItems()
-        if not selected_items:
+    def _apply_from_list(self, list_widget: QListWidget, is_yt_tab: bool = False, explicit_item=None):
+        target_item = explicit_item
+        if target_item is None:
+            selected_items = list_widget.selectedItems()
+            target_item = selected_items[0] if selected_items else list_widget.currentItem()
+        if target_item is None:
             QMessageBox.warning(self, "Chú ý", "Vui lòng chọn bài hát trong danh sách.")
             return
 
-        item_data = selected_items[0].data(Qt.ItemDataRole.UserRole)
+        item_data = target_item.data(Qt.ItemDataRole.UserRole) or {}
         synced_text = item_data.get("syncedLyrics")
         plain_text = item_data.get("plainLyrics")
 
-        if synced_text and synced_text.startswith("http"):
+        if synced_text and isinstance(synced_text, str) and synced_text.startswith("http"):
             try:
                 resp = requests.get(synced_text, headers=self.provider.headers, timeout=5)
-                if resp.status_code == 200:
+                if resp.status_code == 200 and resp.content:
                     synced_text = resp.content.decode("utf-8", errors="replace").lstrip("\ufeff")
                 else:
                     synced_text = None
@@ -515,13 +550,22 @@ class SearchDialog(QDialog):
         parsed_lines = []
         if synced_text:
             parsed_lines = self.provider.parse_lrc(synced_text, duration=duration)
-        elif plain_text:
+        if not parsed_lines and plain_text:
             parsed_lines = self.provider.parse_lrc(plain_text, duration=duration)
+
+        if not parsed_lines:
+            QMessageBox.warning(
+                self, "Không có lời bài hát",
+                "Phiên bản bạn vừa chọn không có nội dung lời hoặc không tải được từ máy chủ.\n"
+                "Vui lòng chọn một phiên bản khác trong danh sách!"
+            )
+            return
 
         formatted_data = {
             "title": item_data.get("trackName"),
             "artist": item_data.get("artistName"),
             "synced": True,
+            "sync_offset": 0.0,
             "lines": parsed_lines,
             "raw_lrc": synced_text or plain_text,
             "source": f"Manual Search ({item_data.get('source', 'Online')})"
@@ -552,11 +596,15 @@ class SearchDialog(QDialog):
                 duration = self.parent().current_media_state.duration
 
         parsed_lines = self.provider.parse_lrc(text, duration=duration)
+        if not parsed_lines:
+            QMessageBox.warning(self, "Chú ý", "Nội dung bạn dán không hợp lệ hoặc không có dòng lời nào.")
+            return
 
         formatted_data = {
             "title": self.clean_query or "Custom Song",
             "artist": "Custom",
             "synced": True,
+            "sync_offset": 0.0,
             "lines": parsed_lines,
             "raw_lrc": text,
             "source": "Custom Paste"

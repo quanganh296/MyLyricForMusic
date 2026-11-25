@@ -1046,7 +1046,7 @@ class LyricsProvider:
         return None
 
     def search_custom(self, query: str):
-        """Returns a list of search result candidates from LRCLIB and ZingMP3 (auto-prioritizes LRCLIB for CJK/intl)."""
+        """Returns verified lyric candidates (with non-empty lyrics) from ZingMP3, LRCLIB, and NetEase."""
         results = []
         if not query:
             return results
@@ -1058,14 +1058,17 @@ class LyricsProvider:
             if yt_info and yt_info.get("title"):
                 query = yt_info["title"]
 
-        queries = self.get_search_candidates(query)
-        if query.strip() and query.strip() not in queries:
-            queries.append(query.strip())
+        # Put exact user query and cleaned title FIRST so manual searches are never dropped
+        queries = []
+        cleaned_q = self.clean_title(query).strip()
+        for q in [cleaned_q, query.strip()] + self.get_search_candidates(query):
+            if q and q not in queries:
+                queries.append(q)
 
         seen_keys = set()
 
         def _search_zing():
-            for q in queries[:3]:
+            for q in queries[:4]:
                 try:
                     url = f"https://ac.zingmp3.vn/v1/web/ac-suggestions?query={urllib.parse.quote(q)}"
                     resp = requests.get(url, headers=self.headers, timeout=5)
@@ -1074,29 +1077,33 @@ class LyricsProvider:
                         items = data.get("data", {}).get("items", [])
                         for item in items:
                             for sug in item.get("suggestions", []):
-                                if sug.get("type") == 1:
-                                    title = sug.get("title", "")
-                                    artists = ", ".join([a.get("name", "") for a in sug.get("artists", []) if a.get("name")])
-                                    lyric_url = sug.get("lyricLink")
-                                    key = f"zmp3_{title}_{artists}"
-                                    if key not in seen_keys:
-                                        seen_keys.add(key)
-                                        results.append({
-                                            "id": key,
-                                            "trackName": title,
-                                            "artistName": artists,
-                                            "albumName": "ZingMP3",
-                                            "duration": sug.get("duration", 210),
-                                            "synced": bool(lyric_url),
-                                            "syncedLyrics": lyric_url,
-                                            "plainLyrics": None,
-                                            "source": "ZingMP3"
-                                        })
+                                if sug.get("type") != 1:
+                                    continue
+                                lyric_url = (sug.get("lyricLink") or "").strip()
+                                # Skip songs that have NO lyric link on ZingMP3 (otherwise selecting them yields 0 lines!)
+                                if not lyric_url or not lyric_url.startswith("http"):
+                                    continue
+                                title = sug.get("title", "")
+                                artists = ", ".join([a.get("name", "") for a in sug.get("artists", []) if a.get("name")])
+                                key = f"zmp3_{sug.get('id') or title}_{artists}"
+                                if key not in seen_keys:
+                                    seen_keys.add(key)
+                                    results.append({
+                                        "id": key,
+                                        "trackName": title,
+                                        "artistName": artists,
+                                        "albumName": "ZingMP3",
+                                        "duration": sug.get("duration", 210),
+                                        "synced": True,
+                                        "syncedLyrics": lyric_url,
+                                        "plainLyrics": None,
+                                        "source": "ZingMP3"
+                                    })
                 except Exception as e:
                     print(f"[ZingMP3 Custom Search Error] {e}")
 
         def _search_lrclib():
-            for q in queries[:3]:
+            for q in queries[:4]:
                 try:
                     url = f"https://lrclib.net/api/search?q={urllib.parse.quote(q)}"
                     resp = requests.get(url, headers=self.headers, timeout=5)
@@ -1105,6 +1112,11 @@ class LyricsProvider:
                         if not isinstance(raw_list, list):
                             continue
                         for item in raw_list:
+                            synced_str = (item.get("syncedLyrics") or "").strip()
+                            plain_str = (item.get("plainLyrics") or "").strip()
+                            # Skip instrumental / empty LRCLIB rows with zero lyrics
+                            if not synced_str and not plain_str:
+                                continue
                             item_id = item.get("id")
                             key = f"lrclib_{item_id}"
                             if key not in seen_keys:
@@ -1115,13 +1127,66 @@ class LyricsProvider:
                                     "artistName": item.get("artistName"),
                                     "albumName": item.get("albumName"),
                                     "duration": item.get("duration"),
-                                    "synced": bool(item.get("syncedLyrics")),
-                                    "syncedLyrics": item.get("syncedLyrics"),
-                                    "plainLyrics": item.get("plainLyrics"),
+                                    "synced": bool(synced_str),
+                                    "syncedLyrics": synced_str or None,
+                                    "plainLyrics": plain_str or None,
                                     "source": "LRCLIB"
                                 })
                 except Exception as e:
                     print(f"[LRCLIB Custom Search Error] {e}")
+
+        def _search_netease():
+            for q in queries[:2]:
+                try:
+                    ne_headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Referer": "https://music.163.com/"
+                    }
+                    resp = requests.post(
+                        "https://music.163.com/api/cloudsearch/pc",
+                        data={"s": q, "type": 1, "limit": 5, "offset": 0},
+                        headers=ne_headers,
+                        timeout=5
+                    )
+                    if resp.status_code != 200:
+                        continue
+                    songs = resp.json().get("result", {}).get("songs", [])
+                    for song in songs[:4]:
+                        sid = song.get("id")
+                        key = f"netease_{sid}"
+                        if not sid or key in seen_keys:
+                            continue
+                        l_resp = requests.get(
+                            f"https://music.163.com/api/song/lyric?id={sid}&lv=1",
+                            headers=ne_headers,
+                            timeout=4
+                        )
+                        if l_resp.status_code != 200:
+                            continue
+                        lrc_str = (l_resp.json().get("lrc", {}).get("lyric") or "").strip()
+                        if not lrc_str:
+                            continue
+                        parsed_check = self.parse_lrc(lrc_str)
+                        if not parsed_check:
+                            continue
+                        seen_keys.add(key)
+                        title = song.get("name", "")
+                        artists = ", ".join([a.get("name", "") for a in (song.get("ar") or song.get("artists") or []) if a.get("name")])
+                        dur_sec = (song.get("dt") or song.get("duration") or 0) / 1000.0
+                        has_ts = bool(re.search(r'\[\d+:\d+', lrc_str))
+                        results.append({
+                            "id": key,
+                            "trackName": title,
+                            "artistName": artists,
+                            "albumName": (song.get("al") or {}).get("name", "NetEase"),
+                            "duration": dur_sec if dur_sec > 0 else 210,
+                            "synced": has_ts,
+                            "syncedLyrics": lrc_str if has_ts else None,
+                            "plainLyrics": lrc_str if not has_ts else None,
+                            "source": "NetEase"
+                        })
+                except Exception as e:
+                    print(f"[NetEase Custom Search Error] {e}")
 
         if self._has_intl_script(query):
             _search_lrclib()
@@ -1130,4 +1195,16 @@ class LyricsProvider:
             _search_zing()
             _search_lrclib()
 
+        # Fallback to NetEase if fewer than 3 synced results were found
+        synced_count = sum(1 for r in results if r.get("synced"))
+        if synced_count < 3:
+            _search_netease()
+
+        # Sort by: (1) matches queried title, (2) synced lyrics first, (3) original source order
+        def _custom_rank(pair):
+            idx, r = pair
+            title_ok = self.is_valid_match(query, r.get("trackName") or "")
+            return (0 if title_ok else 1, 0 if r.get("synced") else 1, idx)
+
+        results = [r for _, r in sorted(enumerate(results), key=_custom_rank)]
         return results

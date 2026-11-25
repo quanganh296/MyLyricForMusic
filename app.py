@@ -136,7 +136,13 @@ class LyricOverlayApp:
     def open_search(self):
         current_query = ""
         if self.overlay.current_media_state and self.overlay.current_media_state.title:
-            current_query = f"{self.overlay.current_media_state.title} {self.overlay.current_media_state.artist}".strip()
+            title = (self.overlay.current_media_state.title or "").strip()
+            artist = (self.overlay.current_media_state.artist or "").strip()
+            if "-" in title or "|" in title:
+                current_query = title
+            else:
+                clean_a = self.lyrics_provider._normalize_artist(artist)
+                current_query = f"{title} {clean_a}".strip() if clean_a else title
         
         dlg = SearchDialog(self.lyrics_provider, initial_query=current_query, parent=self.overlay)
         dlg.lyric_selected.connect(self.overlay.set_custom_lyrics)

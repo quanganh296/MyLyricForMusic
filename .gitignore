@@ -1,0 +1,27 @@
+# Python & Virtual Environments
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller build artifacts & local packaged binary (published via GitHub Releases)
+build/
+dist/
+*.exe
+
+# Local runtime cache & personal user settings
+cache/
+config.json
+lyrics-overlay/
+
+# Temporary / scratch test scripts
+scratch_*.py
+*.log
+
+# OS / IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

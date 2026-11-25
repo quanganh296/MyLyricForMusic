@@ -1,0 +1,10 @@
+PyQt6
+QtAwesome
+QtPy
+Pillow
+requests
+yt-dlp
+winsdk
+pycaw
+psutil
+pyinstaller

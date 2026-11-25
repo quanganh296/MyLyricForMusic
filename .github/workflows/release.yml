@@ -1,0 +1,79 @@
+name: Build & Publish LyricNow Windows Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build LyricNow.exe with PyInstaller
+        run: |
+          pyinstaller LyricNow.spec --noconfirm
+
+      - name: Verify executable exists
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/LyricNow.exe")) {
+            Write-Error "dist/LyricNow.exe was not generated!"
+            exit 1
+          }
+          Get-Item "dist/LyricNow.exe" | Select-Object Name, Length
+
+      - name: Determine release tag
+        id: meta
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub Release with LyricNow.exe
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "LyricNow ${{ steps.meta.outputs.tag }} (Windows)"
+          body: |
+            ## Tải về & Sử dụng ngay (Không cần cài Python / Không cần clone code)
+
+            1. Tải file **`LyricNow.exe`** ở mục **Assets** bên dưới.
+            2. Nhấp đúp mở **`LyricNow.exe`** để sử dụng ngay trên Windows 10 / Windows 11.
+               *(Nếu Windows Defender SmartScreen hiện cảnh báo tệp tải mới từ Internet, chọn **More info** -> **Run anyway**.)*
+
+            ### Tính năng nổi bật
+            - **2 chế độ hiển thị:** Mode 1 (Video bên phải + Lyric bên trái nền mờ & đổi màu chữ tự động theo video, hỗ trợ Toàn màn hình `F11`) và Mode 2 (Chỉ hiện Lyric ở giữa, thu phóng linh hoạt).
+            - **Tự nhận diện & dịch nhạc nước ngoài 3 tầng:** Hỗ trợ Nhật, Hàn, Trung, Anh, Thái, Nga... tự tạo phiên âm (Romaji / Pinyin / Latin) và dịch tiếng Việt ngay dưới lời gốc.
+            - **Đồng bộ thời gian thực Windows GSMTC:** Tự bắt nhạc từ YouTube, Chrome, Edge, Spotify... tự bù nhạc dạo khi video cắt ngắn và lưu độ lệch riêng theo từng bài.
+            - **Hiển thị pin tai nghe Bluetooth:** Báo phần trăm pin và trạng thái kết nối tai nghe bên Trái / Phải / cả 2 bên.
+            - **Tìm kiếm lời thủ công & theo link YouTube.**
+          files: dist/LyricNow.exe
+          draft: false
+          prerelease: false

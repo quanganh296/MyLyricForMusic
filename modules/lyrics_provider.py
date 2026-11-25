@@ -267,6 +267,100 @@ class LyricsProvider:
         """Returns True if text contains Japanese, Korean, Chinese, Thai, or Cyrillic characters."""
         return bool(self._INTL_SCRIPT_RE.search(text or ""))
 
+    _VERSION_TAG_DEFS = (
+        ("solo", re.compile(r'(?i)\bsolo(?:\s+ver(?:sion)?)?\b')),
+        ("acoustic", re.compile(r'(?i)\bacoustic\b')),
+        ("piano", re.compile(r'(?i)\bpiano(?:\s+ver(?:sion)?)?\b')),
+        ("live", re.compile(r'(?i)\blive\b')),
+        ("lofi", re.compile(r'(?i)\blo-?fi\b')),
+        ("remix", re.compile(r'(?i)\b(remix|bootleg|cukak|vinahouse|edm|house|mashup)\b')),
+        ("cover", re.compile(r'(?i)\bcover\b')),
+        ("demo", re.compile(r'(?i)\bdemo\b')),
+        ("speed", re.compile(r'(?i)\b(speed\s*up|sped\s*up|slowed|reverb)\b')),
+        ("unplugged", re.compile(r'(?i)\bunplugged\b')),
+    )
+
+    def _extract_version_tags(self, text: str) -> set:
+        if not text:
+            return set()
+        tags = set()
+        for name, pat in self._VERSION_TAG_DEFS:
+            if pat.search(text):
+                tags.add(name)
+        return tags
+
+    def _version_match_score(self, req_title: str, cand_title: str) -> float:
+        """
+        Scores alignment of version tags (Solo Version, Acoustic, Remix, Lofi, Live, Demo, etc.)
+        so 'Forget Me Now (Solo Version)' always prefers Solo Version over Duet/Remix!
+        """
+        req_tags = self._extract_version_tags(req_title)
+        cand_tags = self._extract_version_tags(cand_title)
+        score = 0.0
+
+        for t in req_tags:
+            if t in cand_tags:
+                score += 220.0
+            else:
+                score -= 80.0
+
+        for t in cand_tags:
+            if t not in req_tags:
+                score -= 120.0
+
+        # Fine-grained Demo 1 vs Demo 2 alignment
+        if "demo" in req_tags:
+            req_d2 = bool(re.search(r'(?i)\bdemo\s*2\b', req_title or ""))
+            cand_d1 = bool(re.search(r'(?i)\bdemo\s*1\b', cand_title or ""))
+            cand_d2 = bool(re.search(r'(?i)\bdemo\s*2\b', cand_title or ""))
+            if req_d2:
+                score += 80.0 if cand_d2 else (-40.0 if cand_d1 else 0.0)
+            else:
+                if cand_d1 or ("demo" in cand_tags and not cand_d2):
+                    score += 60.0
+                elif cand_d2:
+                    score -= 60.0
+
+        return score
+
+    def clean_search_query(self, title: str) -> str:
+        """
+        Cleans YouTube noise (Official MV, Lyrics Video, HD, 4K...) for manual search display
+        while PRESERVING meaningful version tags like (Solo Version), (Acoustic), (Remix), (Demo).
+        """
+        if not title:
+            return ""
+        cleaned = title.replace('\u3000', ' ')
+
+        def _keep_version_paren(m):
+            full = m.group(0)
+            inner = m.group(1).strip()
+            if inner and self._extract_version_tags(inner):
+                return f" ({inner}) "
+            return " "
+
+        cleaned = re.sub(r'[\(\[\{（［](.*?)[\)\]\}）］]', _keep_version_paren, cleaned)
+        cleaned = re.sub(r'【(.*?)】', lambda m: f" {m.group(1).strip()} " if (m.group(1).strip() and not self._LENT_BRACKET_NOISE_RE.search(m.group(1))) else " ", cleaned)
+        cleaned = re.sub(r'[「」『』《》〈〉]', ' ', cleaned)
+
+        noise_phrases = [
+            "official music video", "official video", "official mv", "official lyrics video",
+            "official lyric video", "lyric video", "lyrics video", "official audio",
+            "full audio", "m/v", "mv", "hd", "4k", "visualizer", "performance video",
+            "music video", "full track", "video lyric", "mv lyric", "mv official",
+            "mv hd", "vietsub", "engsub", "lyrics", "lyric", "karaoke"
+        ]
+        for phrase in noise_phrases:
+            cleaned = re.sub(r'(?i)\b' + re.escape(phrase) + r'\b', ' ', cleaned)
+            cleaned = re.sub(r'(?i)\b' + re.escape(phrase.replace('/', r'\/')) + r'\b', ' ', cleaned)
+
+        cleaned = re.sub(r'(?i)(?:[\|\-–—\(\[]\s*)?\b(?:ep|album|mixtape|mini\s*album|playlist|tracklist)\b.*$', '', cleaned)
+        cleaned = re.sub(r'[\"\'“”„‟‘’＂＇]', '', cleaned)
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        cleaned = re.sub(r'^[-\|\:\+&·•—–｜：／\/\s]+|[-\|\:\+&·•—–｜：／\/\s]+$', '', cleaned)
+        cleaned = re.sub(r'^\s*(?:track\s*#?\s*)?\d{1,2}\s*[\.\)\-:]\s+', '', cleaned, flags=re.IGNORECASE)
+        return cleaned.strip()
+
     def clean_title(self, title: str) -> str:
         """Removes common noise from YouTube song titles across Vietnamese, English, Japanese, Korean, Chinese, etc."""
         if not title:
@@ -302,11 +396,11 @@ class LyricsProvider:
 
         # 5. Remove common ASCII YouTube noise phrases
         noise_phrases = [
-            "official music video", "official video", "official mv", "lyric video",
-            "lyrics video", "official audio", "full audio", "m/v", "mv", "hd", "4k",
-            "visualizer", "performance video", "music video", "cover", "remix",
-            "full track", "audio", "video lyric", "mv lyric", "mv official", "mv hd",
-            "ost", "lyrics", "lyric", "karaoke"
+            "official music video", "official video", "official mv", "official lyrics video",
+            "official lyric video", "lyric video", "lyrics video", "official audio",
+            "full audio", "m/v", "mv", "hd", "4k", "visualizer", "performance video",
+            "music video", "cover", "remix", "full track", "audio", "video lyric",
+            "mv lyric", "mv official", "mv hd", "official", "ost", "lyrics", "lyric", "karaoke"
         ]
         for phrase in noise_phrases:
             cleaned = re.sub(r'(?i)\b' + re.escape(phrase) + r'\b', ' ', cleaned)
@@ -624,6 +718,9 @@ class LyricsProvider:
             hits = sum(1 for tok in req_meta_tokens if tok in res_meta)
             score += min(220.0, hits * 55.0)
 
+        # Version tag alignment (Solo Version, Acoustic, Live, Lofi, Remix, Demo...)
+        score += self._version_match_score(req_title, res_title)
+
         # Duration match bonus / mismatch penalty
         if target_dur and target_dur > 30.0 and item_dur and item_dur > 30.0:
             diff = abs(float(item_dur) - float(target_dur))
@@ -697,11 +794,17 @@ class LyricsProvider:
         song_segs = self._extract_song_segments(title, clean_a)
         exact_title_query = song_segs[0] if song_segs else clean_t
 
-        # 1. Check local cache first (auto-invalidate legacy unsynced, duration-mismatched, OR wrong-song cached entries!)
+        # 1. Check local cache first: check EXACT raw title BEFORE cleaned title so '(Solo Version)' never collides with original!
         if self.cache:
-            cached_data = self.cache.get(clean_t, clean_a)
+            req_ver_tags = self._extract_version_tags(title)
+            cached_data = self.cache.get(title, clean_a)
             if not cached_data and title != clean_t:
-                cached_data = self.cache.get(title, artist)
+                fallback_cached = self.cache.get(clean_t, clean_a)
+                if fallback_cached:
+                    # Only reuse stripped-title cache if version tags match (or neither has version tags)
+                    cand_ver_tags = self._extract_version_tags(fallback_cached.get("title", ""))
+                    if req_ver_tags == cand_ver_tags:
+                        cached_data = fallback_cached
             if cached_data and cached_data.get("lines"):
                 src = str(cached_data.get("source") or "")
                 is_manual = ("Manual" in src) or ("Custom" in src)
@@ -751,11 +854,16 @@ class LyricsProvider:
                     if data:
                         break
         else:
-            # Pass 1 (SYNCED ONLY): ZingMP3 (strictly validated & ranked) -> LRCLIB Exact -> LRCLIB Search (ranked!) -> NetEase CloudSearch
+            # Pass 1 (SYNCED ONLY): ZingMP3 (strictly validated & artist-checked) -> LRCLIB -> NetEase -> weak ZingMP3 fallback
+            zing_weak_fallback = None
             for cand in candidates:
-                data = self._fetch_zingmp3_search(cand, req_title=title, req_artist=clean_a, duration=duration)
-                if data:
-                    break
+                z_res = self._fetch_zingmp3_search(cand, req_title=title, req_artist=clean_a, duration=duration)
+                if z_res:
+                    if z_res.pop("_artist_matched", False):
+                        data = z_res
+                        break
+                    elif not zing_weak_fallback:
+                        zing_weak_fallback = z_res
             if not data:
                 data, pf = self._fetch_lrclib_exact(exact_title_query, norm_a or clean_a, duration=duration, require_synced=True, req_title=title)
                 if pf and not plain_fallback:
@@ -772,6 +880,8 @@ class LyricsProvider:
                     data = self._fetch_netease_search(cand, req_title=title, req_artist=clean_a)
                     if data:
                         break
+            if not data and zing_weak_fallback:
+                data = zing_weak_fallback
 
         # Pass 2: Use best scored plainLyrics fallback ONLY if zero synced lyrics exist anywhere
         if not data and plain_fallback:
@@ -780,7 +890,9 @@ class LyricsProvider:
         if data:
             self._apply_auto_intro_offset(data, duration)
             if self.cache:
-                self.cache.set(clean_t, clean_a, data)
+                self.cache.set(title, clean_a, data)
+                if not self._extract_version_tags(title) and clean_t != title:
+                    self.cache.set(clean_t, clean_a, data)
 
         return data
 
@@ -816,31 +928,35 @@ class LyricsProvider:
                         # Artist match bonus (check against both channel artist AND artist named in YouTube title)
                         artists_f = self._fold_latin(artists)
                         req_title_f = self._fold_latin(req_title)
+                        artist_matched = False
                         if norm_req_a and norm_req_a in artists_f:
                             score += 150.0
+                            artist_matched = True
                         elif artists_f and any(tok in req_title_f for tok in re.findall(r'[a-z0-9]{3,}', artists_f)):
                             score += 110.0
+                            artist_matched = True
+
+                        # If artist does NOT match AND ZingMP3 title has extra words not in req_title (e.g. 'Hoàn Hảo Hơn' vs 'Hoàn Hảo | B RAY'), skip so LRCLIB can provide the exact track!
+                        if not artist_matched and req_title:
+                            res_words = set(re.findall(r'[a-z0-9]{2,}', self._fold_latin(self.clean_title(res_title))))
+                            req_words = set(re.findall(r'[a-z0-9]{2,}', req_title_f))
+                            if res_words and (res_words - req_words):
+                                continue
 
                         # Skip unsolicited remix/bootleg/cover on ZingMP3 so LRCLIB can provide the real original track
                         sug_is_remix = bool(re.search(r'(?i)\b(remix|bootleg|cover|live|lofi|slowed)\b', res_title))
                         if sug_is_remix and not req_is_remix:
                             continue
 
-                        # Demo version alignment: '( Demo )' matches Demo / Demo 1 over Demo 2; non-demo prefers non-demo!
-                        sug_low = res_title.lower()
-                        sug_is_demo = bool(re.search(r'\bdemo\b', sug_low))
-                        sug_is_demo1 = bool(re.search(r'\bdemo\s*1\b', sug_low))
-                        sug_is_demo2 = bool(re.search(r'\bdemo\s*2\b', sug_low))
-                        if req_wants_demo:
-                            if req_wants_demo2:
-                                score += 90.0 if sug_is_demo2 else (-30.0 if sug_is_demo1 else 0.0)
-                            else:
-                                if sug_is_demo1 or (sug_is_demo and not sug_is_demo2):
-                                    score += 90.0
-                                elif sug_is_demo2:
-                                    score -= 50.0
-                        elif sug_is_demo:
-                            score -= 70.0
+                        # Version tag alignment (Solo Version, Acoustic, Demo, Live, Lofi, Remix...)
+                        score += self._version_match_score(req_title, res_title)
+
+                        # Solo version explicitly prefers single-artist track over multi-artist duet
+                        if "solo" in self._extract_version_tags(req_title):
+                            if len(sug.get("artists", [])) == 1:
+                                score += 60.0
+                            elif len(sug.get("artists", [])) > 1:
+                                score -= 40.0
 
                         # Duration alignment
                         if duration > 30.0 and sug_dur > 30.0:
@@ -852,10 +968,10 @@ class LyricsProvider:
                             elif diff > 50.0:
                                 score -= 80.0
 
-                        valid_sugs.append((score, res_title, artists, lyric_url))
+                        valid_sugs.append((score, artist_matched, res_title, artists, lyric_url))
 
                 valid_sugs.sort(key=lambda x: x[0], reverse=True)
-                for _, res_title, artists, lyric_url in valid_sugs:
+                for _, is_art_match, res_title, artists, lyric_url in valid_sugs:
                     l_resp = requests.get(lyric_url, headers=self.headers, timeout=5)
                     if l_resp.status_code == 200 and l_resp.content:
                         lrc_text = l_resp.content.decode("utf-8", errors="replace").lstrip("\ufeff")
@@ -868,7 +984,8 @@ class LyricsProvider:
                                 "has_real_timestamps": True,
                                 "lines": parsed,
                                 "raw_lrc": lrc_text,
-                                "source": "ZingMP3"
+                                "source": "ZingMP3",
+                                "_artist_matched": is_art_match,
                             }
         except Exception as e:
             print(f"[ZingMP3 Error] {e}")
@@ -1046,7 +1163,7 @@ class LyricsProvider:
         return None
 
     def search_custom(self, query: str):
-        """Returns verified lyric candidates (with non-empty lyrics) from ZingMP3, LRCLIB, and NetEase."""
+        """Returns verified, well-ranked lyric candidates (with non-empty lyrics) from ZingMP3, LRCLIB, and NetEase."""
         results = []
         if not query:
             return results
@@ -1058,14 +1175,49 @@ class LyricsProvider:
             if yt_info and yt_info.get("title"):
                 query = yt_info["title"]
 
-        # Put exact user query and cleaned title FIRST so manual searches are never dropped
+        # Build up to 4 DISTINCT high-signal queries (version-specific first, then broad title fallback; NEVER bare artist!)
         queries = []
-        cleaned_q = self.clean_title(query).strip()
-        for q in [cleaned_q, query.strip()] + self.get_search_candidates(query):
-            if q and q not in queries:
-                queries.append(q)
+        seen_q_norm = set()
+
+        def _add_q(q_str: str):
+            q_str = re.sub(r'\s+', ' ', (q_str or "")).strip()
+            q_str = re.sub(r'^[-\|\:\s]+|[-\|\:\s]+$', '', q_str).strip()
+            q_norm = re.sub(r'[^a-z0-9\u00c0-\u024f\u1e00-\u1eff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]+', ' ', q_str.lower()).strip()
+            if q_str and q_norm and q_norm not in seen_q_norm:
+                seen_q_norm.add(q_norm)
+                queries.append(q_str)
+
+        search_clean = self.clean_search_query(query)
+        unwrapped = re.sub(r'[\(\[\{（［](.*?)[\)\]\}）］]', r' \1 ', search_clean)
+        unwrapped = re.sub(r'\s*[|｜]\s*|\s+[-–—]\s+', ' ', unwrapped)
+
+        # 1. Exact song segment + version tag (e.g. 'Forget Me Now Solo Version')
+        ver_parts = re.split(r'\s+[-–—]\s+|\s*[|｜]\s*', search_clean)
+        if len(ver_parts) >= 2:
+            ver_parts_sorted = sorted(
+                [p.strip() for p in ver_parts if p.strip()],
+                key=lambda p: (1 if self._extract_version_tags(p) else 0, len(p.split()), len(p)),
+                reverse=True
+            )
+            top_seg = re.sub(r'[\(\[\{（［](.*?)[\)\]\}）］]', r' \1 ', ver_parts_sorted[0])
+            _add_q(top_seg)
+
+        # 2. Full unwrapped query (artist + song + version)
+        _add_q(unwrapped)
+
+        # 3. Clean title without version tag (so other versions & tracks with unusual tags are STILL found!)
+        cleaned_no_ver = re.sub(r'\s*[|｜]\s*|\s+[-–—]\s+', ' ', self.clean_title(query))
+        _add_q(cleaned_no_ver)
+
+        # 4. Primary song title segment alone (broadest fallback, never bare artist!)
+        song_segs = self._extract_song_segments(query)
+        if song_segs:
+            best_seg = max(song_segs, key=lambda s: (len(s.split()), len(s)))
+            _add_q(best_seg)
+        _add_q(query.strip())
 
         seen_keys = set()
+        seen_content = set()
 
         def _search_zing():
             for q in queries[:4]:
@@ -1119,8 +1271,15 @@ class LyricsProvider:
                                 continue
                             item_id = item.get("id")
                             key = f"lrclib_{item_id}"
-                            if key not in seen_keys:
+                            # Deduplicate identical LRCLIB uploads (same title + duration + text fingerprint)
+                            t_norm = (item.get("trackName") or "").strip().lower()
+                            a_norm = (item.get("artistName") or "").strip().lower()
+                            dur_bin = int(round(float(item.get("duration") or 0) / 3.0))
+                            lrc_fp = re.sub(r'\s+', '', (synced_str or plain_str)[:90])
+                            content_sig = f"lrc|{t_norm}|{a_norm}|{dur_bin}|{bool(synced_str)}|{lrc_fp}"
+                            if key not in seen_keys and content_sig not in seen_content:
                                 seen_keys.add(key)
+                                seen_content.add(content_sig)
                                 results.append({
                                     "id": key,
                                     "trackName": item.get("trackName"),
@@ -1144,14 +1303,14 @@ class LyricsProvider:
                     }
                     resp = requests.post(
                         "https://music.163.com/api/cloudsearch/pc",
-                        data={"s": q, "type": 1, "limit": 5, "offset": 0},
+                        data={"s": q, "type": 1, "limit": 6, "offset": 0},
                         headers=ne_headers,
                         timeout=5
                     )
                     if resp.status_code != 200:
                         continue
                     songs = resp.json().get("result", {}).get("songs", [])
-                    for song in songs[:4]:
+                    for song in songs[:5]:
                         sid = song.get("id")
                         key = f"netease_{sid}"
                         if not sid or key in seen_keys:
@@ -1195,16 +1354,27 @@ class LyricsProvider:
             _search_zing()
             _search_lrclib()
 
-        # Fallback to NetEase if fewer than 3 synced results were found
-        synced_count = sum(1 for r in results if r.get("synced"))
-        if synced_count < 3:
+        # Fallback to NetEase if fewer than 3 TITLE-MATCHING synced results were found
+        relevant_synced = sum(
+            1 for r in results
+            if r.get("synced") and self.is_valid_match(query, r.get("trackName") or "")
+        )
+        if relevant_synced < 3:
             _search_netease()
 
-        # Sort by: (1) matches queried title, (2) synced lyrics first, (3) original source order
+        # Rank by: (1) matches queried title, (2) version tag match (Solo/Remix/Acoustic/Demo), (3) synced first, (4) original order
+        req_ver_tags = self._extract_version_tags(query)
         def _custom_rank(pair):
             idx, r = pair
-            title_ok = self.is_valid_match(query, r.get("trackName") or "")
-            return (0 if title_ok else 1, 0 if r.get("synced") else 1, idx)
+            cand_title = r.get("trackName") or ""
+            cand_artist = r.get("artistName") or ""
+            title_ok = self.is_valid_match(query, cand_title)
+            ver_score = self._version_match_score(query, cand_title)
+            # Solo version prefers single-artist credit over multi-artist duet
+            if "solo" in req_ver_tags:
+                is_multi = any(sep in cand_artist for sep in (",", "&", "•", "ft.", "feat"))
+                ver_score += (-40.0 if is_multi else 40.0)
+            return (0 if title_ok else 1, -ver_score, 0 if r.get("synced") else 1, idx)
 
         results = [r for _, r in sorted(enumerate(results), key=_custom_rank)]
         return results

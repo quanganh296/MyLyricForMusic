@@ -1430,12 +1430,16 @@ class LyricOverlayWindow(QWidget):
         self.current_line_index = -99
         self.settings["sync_offset"] = float(lyrics_data.get("sync_offset", 0.0) or 0.0)
 
-        # Persist manually chosen lyric for the currently playing track so it sticks across replays
+        # Persist manually chosen lyric under EXACT raw title so '(Solo Version)' never collides with original!
         try:
             if self.current_media_state and self.current_media_state.title and self.lyrics_provider and self.lyrics_provider.cache:
-                clean_t = self.lyrics_provider.clean_title(self.current_media_state.title.strip())
+                raw_t = self.current_media_state.title.strip()
+                clean_t = self.lyrics_provider.clean_title(raw_t)
                 clean_a = (self.current_media_state.artist or "").strip()
-                if clean_t:
+                if raw_t:
+                    self.lyrics_provider.cache.set(raw_t, clean_a, self.current_lyrics)
+                has_ver = hasattr(self.lyrics_provider, "_extract_version_tags") and bool(self.lyrics_provider._extract_version_tags(raw_t))
+                if clean_t and clean_t != raw_t and not has_ver:
                     self.lyrics_provider.cache.set(clean_t, clean_a, self.current_lyrics)
         except Exception:
             pass
@@ -1462,16 +1466,14 @@ class LyricOverlayWindow(QWidget):
         if self.display_mode == 1 and (custom_vid or thumb_url or not self.current_media_state):
             self._trigger_mode1_media_load()
 
-        # Trigger async romanization & translation for manually selected / pasted lyrics
+        # Clear old translation/romaji first, snap visible lyrics immediately, then trigger fresh translation!
         self.lbl_active_romaji.setText("")
         self.lbl_active_romaji.setVisible(False)
         self.lbl_active_trans.setText("")
         self.lbl_active_trans.setVisible(False)
-        self._trigger_translation_if_needed()
 
         lines = self.current_lyrics.get("lines", [])
         if self.current_media_state:
-            # Immediately snap overlay text to the newly chosen lyrics (even if music is paused!)
             self.update_lyric_display()
         elif lines:
             self.lbl_prev2.setText("")
@@ -1480,6 +1482,10 @@ class LyricOverlayWindow(QWidget):
             self._update_active_translation_label(0)
             self.lbl_next.setText(lines[1]["text"] if len(lines) > 1 else "")
             self.lbl_next2.setText(lines[2]["text"] if len(lines) > 2 else "")
+
+        self._trigger_translation_if_needed()
+        self.container.update()
+        self.update()
 
     def _refresh_visible_lines(self):
         if not self.current_lyrics or not self.current_lyrics.get("lines"):

@@ -14,16 +14,19 @@ class SearchDialog(QDialog):
         super().__init__(parent)
         self.provider = lyrics_provider
         self.setWindowTitle("Tìm kiếm & Dán Lời Bài Hát - LyricNow")
-        self.resize(620, 520)
-        self.setMinimumSize(520, 420)
+        self.resize(650, 580)
+        self.setMinimumSize(540, 460)
 
         # Synchronize window opacity with main overlay window
         if parent and hasattr(parent, "settings"):
             op = float(parent.settings.get("bg_opacity", 0.75))
             self.setWindowOpacity(max(0.15, op))
-        
-        # Clean initial query automatically
-        self.clean_query = self.provider.clean_title(initial_query) if initial_query else ""
+
+        # Preserve version tags like (Solo Version), (Acoustic), (Remix), (Demo) in initial search query
+        if initial_query and hasattr(self.provider, "clean_search_query"):
+            self.clean_query = self.provider.clean_search_query(initial_query)
+        else:
+            self.clean_query = self.provider.clean_title(initial_query) if initial_query else ""
         if not self.clean_query:
             self.clean_query = initial_query
 
@@ -72,13 +75,20 @@ class SearchDialog(QDialog):
 
         self.result_list = QListWidget()
         self.result_list.itemDoubleClicked.connect(self.on_item_selected)
-        t1_layout.addWidget(self.result_list)
+        self.result_list.currentItemChanged.connect(lambda cur, _prev: self._update_preview(cur, self.txt_preview_online))
+        t1_layout.addWidget(self.result_list, stretch=3)
 
-        btn_apply_online = QPushButton(" Áp dụng lời bài hát đã chọn")
-        btn_apply_online.setIcon(IconFactory.create_icon("check", "#09090b"))
-        btn_apply_online.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_apply_online.clicked.connect(self.on_apply_clicked)
-        t1_layout.addWidget(btn_apply_online)
+        self.txt_preview_online = QTextEdit()
+        self.txt_preview_online.setReadOnly(True)
+        self.txt_preview_online.setFixedHeight(96)
+        self.txt_preview_online.setPlaceholderText("Bấm vào một phiên bản ở danh sách trên để xem trước nội dung lời bài hát...")
+        t1_layout.addWidget(self.txt_preview_online)
+
+        self.btn_apply_online = QPushButton(" Áp dụng lời bài hát đã chọn")
+        self.btn_apply_online.setIcon(IconFactory.create_icon("check", "#09090b"))
+        self.btn_apply_online.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_apply_online.clicked.connect(self.on_apply_clicked)
+        t1_layout.addWidget(self.btn_apply_online)
 
         self.tabs.addTab(tab_search, IconFactory.create_icon("search", "#38bdf8"), "Tìm kiếm Trực tuyến")
 
@@ -173,7 +183,14 @@ class SearchDialog(QDialog):
 
         self.yt_result_list = QListWidget()
         self.yt_result_list.itemDoubleClicked.connect(self.on_yt_item_selected)
-        t_yt_layout.addWidget(self.yt_result_list)
+        self.yt_result_list.currentItemChanged.connect(lambda cur, _prev: self._update_preview(cur, self.txt_preview_yt))
+        t_yt_layout.addWidget(self.yt_result_list, stretch=2)
+
+        self.txt_preview_yt = QTextEdit()
+        self.txt_preview_yt.setReadOnly(True)
+        self.txt_preview_yt.setFixedHeight(80)
+        self.txt_preview_yt.setPlaceholderText("Bấm vào một phiên bản ở trên để xem trước lời bài hát...")
+        t_yt_layout.addWidget(self.txt_preview_yt)
 
         self.btn_apply_yt = QPushButton(" Áp dụng phiên bản đã chọn")
         self.btn_apply_yt.setIcon(IconFactory.create_icon("check", "#09090b"))
@@ -220,6 +237,11 @@ class SearchDialog(QDialog):
         btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_cancel.clicked.connect(self.reject)
         layout.addWidget(btn_cancel)
+
+        # Prevent QDialog autoDefault from hijacking Enter key (which caused double-search or wrong button trigger!)
+        for btn in self.findChildren(QPushButton):
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
 
         # QSS Styling with Gray Tab Interface
         self.setStyleSheet("""
@@ -379,44 +401,112 @@ class SearchDialog(QDialog):
         album = r.get("albumName") or source
         return f"{header}\nNguồn: {source} | Album: {album}"
 
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self.result_list.hasFocus() and self.result_list.currentItem():
+                self.on_apply_clicked()
+                event.accept()
+                return
+            if self.yt_result_list.hasFocus() and self.yt_result_list.currentItem():
+                self.on_apply_yt_clicked()
+                event.accept()
+                return
+            if self.query_input.hasFocus() or self.yt_url_input.hasFocus():
+                # Handled by QLineEdit.returnPressed; consume so QDialog never triggers another button
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _download_remote_lrc(self, url: str):
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://zingmp3.vn/",
+            }
+            resp = requests.get(url, headers=headers, timeout=6)
+            if resp.status_code == 200 and resp.content:
+                return resp.content.decode("utf-8", errors="replace").lstrip("\ufeff")
+        except Exception as e:
+            print(f"[SearchDialog Fetch LRC Error] {e}")
+        return None
+
+    def _update_preview(self, item, preview_box: QTextEdit):
+        if item is None:
+            preview_box.clear()
+            return
+        list_widget = item.listWidget()
+        item_data = item.data(Qt.ItemDataRole.UserRole) or {}
+        raw = item_data.get("_fetched_lrc") or item_data.get("syncedLyrics") or item_data.get("plainLyrics") or ""
+        if isinstance(raw, str) and raw.startswith("http"):
+            preview_box.setPlainText("Đang tải xem trước lời bài hát...")
+            QApplication.processEvents()
+            fetched = self._download_remote_lrc(raw)
+            if fetched:
+                item_data["_fetched_lrc"] = fetched
+                item.setData(Qt.ItemDataRole.UserRole, item_data)
+                raw = fetched
+            else:
+                if list_widget is None or list_widget.currentItem() is item:
+                    preview_box.setPlainText("Không tải được lời từ liên kết này. Vui lòng chọn phiên bản khác.")
+                return
+            if list_widget is not None and list_widget.currentItem() is not item:
+                return
+
+        clean_lines = []
+        for ln in str(raw).splitlines():
+            txt = re.sub(r'\[[^\]]*\]|<\d+:\d+(?:[\.:]\d+)?>', '', ln).strip()
+            if txt:
+                clean_lines.append(txt)
+        if clean_lines:
+            preview_box.setPlainText("\n".join(clean_lines))
+        else:
+            preview_box.setPlainText("(Không có nội dung lời đọc được ở phiên bản này)")
+
     def do_search(self):
         query = self.query_input.text().strip()
         if not query:
             return
 
         self.result_list.clear()
+        self.txt_preview_online.clear()
         self.btn_search.setEnabled(False)
         self.btn_search.setText(" Đang tìm...")
+        self.lbl_search_status.setText(f"Đang tìm lời bài hát cho: '{query}'...")
+        self.lbl_search_status.setVisible(True)
+        QApplication.processEvents()
 
         # If user entered a YouTube URL into Tab 1 search box
         yt_id = self.provider.extract_youtube_id(query)
         if yt_id:
             self.lbl_search_status.setText("Đang nhận diện link YouTube...")
-            self.lbl_search_status.setVisible(True)
             QApplication.processEvents()
             
             yt_info = self.provider.fetch_youtube_info(yt_id)
             if yt_info and yt_info.get("title"):
                 query = yt_info["title"]
                 self.lbl_search_status.setText(f"Video: {query} (Kênh: {yt_info.get('author', '')})")
-                self.lbl_search_status.setVisible(True)
+                QApplication.processEvents()
 
         results = self.provider.search_custom(query)
         self.btn_search.setEnabled(True)
         self.btn_search.setText(" Tìm trực tuyến")
 
         if not results:
+            self.lbl_search_status.setText(f"Không tìm thấy kết quả cho '{query}'.")
             QMessageBox.information(
                 self, "Thông báo",
                 f"Không tìm thấy lời trên dữ liệu trực tuyến với từ khóa: '{query}'.\n\n"
-                "Bạn có thể chuyển sang Tab 'Tìm theo Link YouTube' hoặc 'Dán Lời Thủ Công'!"
+                "Bạn có thể rút gọn tên bài hát hoặc chuyển sang Tab 'Tìm theo Link YouTube' / 'Dán Lời Thủ Công'!"
             )
             return
 
+        self.lbl_search_status.setText(f"Tìm thấy {len(results)} phiên bản lời — bấm từng dòng để xem trước lời rồi nhấn Áp dụng.")
         for r in results:
             item = QListWidgetItem(self._format_candidate_text(r))
             item.setData(Qt.ItemDataRole.UserRole, r)
             self.result_list.addItem(item)
+        if self.result_list.count() > 0:
+            self.result_list.setCurrentRow(0)
 
     def do_search_youtube_url(self):
         url_text = self.yt_url_input.text().strip()
@@ -441,6 +531,7 @@ class SearchDialog(QDialog):
         self.lbl_yt_status.setText("Đang lấy thông tin video từ YouTube...")
         self.btn_quick_apply.setVisible(False)
         self.yt_result_list.clear()
+        self.txt_preview_yt.clear()
         QApplication.processEvents()
 
         res_data = self.provider.search_by_youtube_url(url_text)
@@ -483,6 +574,8 @@ class SearchDialog(QDialog):
             item = QListWidgetItem(self._format_candidate_text(r))
             item.setData(Qt.ItemDataRole.UserRole, r)
             self.yt_result_list.addItem(item)
+        if self.yt_result_list.count() > 0:
+            self.yt_result_list.setCurrentRow(0)
 
     def on_quick_apply_clicked(self):
         if not self.yt_direct_lyric or not self.yt_direct_lyric.get("lines"):
@@ -528,19 +621,14 @@ class SearchDialog(QDialog):
             return
 
         item_data = target_item.data(Qt.ItemDataRole.UserRole) or {}
-        synced_text = item_data.get("syncedLyrics")
+        synced_text = item_data.get("_fetched_lrc") or item_data.get("syncedLyrics")
         plain_text = item_data.get("plainLyrics")
 
         if synced_text and isinstance(synced_text, str) and synced_text.startswith("http"):
-            try:
-                resp = requests.get(synced_text, headers=self.provider.headers, timeout=5)
-                if resp.status_code == 200 and resp.content:
-                    synced_text = resp.content.decode("utf-8", errors="replace").lstrip("\ufeff")
-                else:
-                    synced_text = None
-            except Exception as e:
-                print(f"[SearchDialog Fetch LRC Error] {e}")
-                synced_text = None
+            synced_text = self._download_remote_lrc(synced_text)
+            if synced_text:
+                item_data["_fetched_lrc"] = synced_text
+                target_item.setData(Qt.ItemDataRole.UserRole, item_data)
 
         duration = 210.0
         if self.parent() and hasattr(self.parent(), "current_media_state") and self.parent().current_media_state:

@@ -17,7 +17,7 @@ except Exception as e:
 
 
 class MediaState:
-    def __init__(self, title="", artist="", album="", is_playing=False, position=0.0, duration=0.0, thumbnail_bytes=None):
+    def __init__(self, title="", artist="", album="", is_playing=False, position=0.0, duration=0.0, thumbnail_bytes=None, playback_rate=1.0):
         self.title = title
         self.artist = artist
         self.album = album
@@ -25,12 +25,16 @@ class MediaState:
         self.position = position
         self.duration = duration
         self.thumbnail_bytes = thumbnail_bytes
+        self.playback_rate = playback_rate if (playback_rate and 0.2 <= playback_rate <= 4.0) else 1.0
         self.created_at = time.time()
 
     def get_current_position(self) -> float:
         if self.is_playing:
-            elapsed = time.time() - self.created_at
-            return self.position + elapsed
+            elapsed = max(0.0, time.time() - self.created_at)
+            pos = self.position + elapsed * self.playback_rate
+            if self.duration and self.duration > 0:
+                pos = min(self.duration, pos)
+            return pos
         return self.position
 
 
@@ -94,22 +98,23 @@ class MediaListenerWorker(QObject):
         self.no_media_since = None
 
     @staticmethod
-    def _compute_gsmtc_position(timeline, is_playing: bool, duration: float):
+    def _compute_gsmtc_position(timeline, is_playing: bool, duration: float, playback_rate: float = 1.0):
         """
         Computes exact current playback position from Windows GSMTC timeline.
         Chrome/Edge only updates timeline.position on play/pause/seek and stores the exact wall-clock
-        timestamp in timeline.last_updated_time, so true position while playing is position + (now - last_updated_time).
+        timestamp in timeline.last_updated_time, so true position while playing is position + (now - last_updated_time) * rate.
         """
         raw_pos = timeline.position.total_seconds() if (timeline and timeline.position) else 0.0
         upd_time = getattr(timeline, "last_updated_time", None) if timeline else None
         has_valid_upd = bool(upd_time is not None and getattr(upd_time, "year", 0) >= 2020)
+        rate = playback_rate if (playback_rate and 0.2 <= playback_rate <= 4.0) else 1.0
 
         if is_playing and has_valid_upd:
             try:
                 age = (datetime.now(timezone.utc) - upd_time).total_seconds()
                 max_age = (duration + 15.0) if (duration and duration > 0) else 7200.0
                 if -2.0 <= age <= max_age:
-                    est = max(0.0, raw_pos + max(0.0, age))
+                    est = max(0.0, raw_pos + max(0.0, age) * rate)
                     if duration and duration > 0:
                         est = min(duration, est)
                     return raw_pos, upd_time, est, True
@@ -176,10 +181,12 @@ class MediaListenerWorker(QObject):
                 playback = s.get_playback_info()
                 status = playback.playback_status if playback else PlaybackStatus.CLOSED
                 is_playing = (status == PlaybackStatus.PLAYING)
+                pb_rate = getattr(playback, "playback_rate", None) if playback else None
+                rate = float(pb_rate) if (pb_rate is not None and 0.2 <= float(pb_rate) <= 4.0) else 1.0
 
                 timeline = s.get_timeline_properties()
                 duration = timeline.end_time.total_seconds() if (timeline and timeline.end_time) else 0.0
-                raw_pos, upd_time, true_pos, has_valid_upd = self._compute_gsmtc_position(timeline, is_playing, duration)
+                raw_pos, upd_time, true_pos, has_valid_upd = self._compute_gsmtc_position(timeline, is_playing, duration, playback_rate=rate)
 
                 # Filter out obvious non-music browser tabs if not currently playing
                 if is_browser_junk_title(title, artist, app_id) and not is_playing:
@@ -213,6 +220,7 @@ class MediaListenerWorker(QObject):
                     "upd_time": upd_time,
                     "position": true_pos,
                     "has_valid_upd": has_valid_upd,
+                    "playback_rate": rate,
                     "app_id": app_id,
                     "thumbnail_ref": props.thumbnail
                 })
@@ -230,9 +238,11 @@ class MediaListenerWorker(QObject):
                         if not is_browser_junk_title(title, artist, app_id):
                             playback = curr_session.get_playback_info()
                             is_playing = (playback.playback_status == PlaybackStatus.PLAYING) if playback else False
+                            pb_rate = getattr(playback, "playback_rate", None) if playback else None
+                            rate = float(pb_rate) if (pb_rate is not None and 0.2 <= float(pb_rate) <= 4.0) else 1.0
                             timeline = curr_session.get_timeline_properties()
                             dur = timeline.end_time.total_seconds() if (timeline and timeline.end_time) else 0.0
-                            raw_pos, upd_time, true_pos, has_valid_upd = self._compute_gsmtc_position(timeline, is_playing, dur)
+                            raw_pos, upd_time, true_pos, has_valid_upd = self._compute_gsmtc_position(timeline, is_playing, dur, playback_rate=rate)
                             return {
                                 "session": curr_session,
                                 "title": title,
@@ -244,6 +254,7 @@ class MediaListenerWorker(QObject):
                                 "upd_time": upd_time,
                                 "position": true_pos,
                                 "has_valid_upd": has_valid_upd,
+                                "playback_rate": rate,
                                 "app_id": app_id,
                                 "thumbnail_ref": props.thumbnail
                             }
@@ -387,7 +398,8 @@ class MediaListenerWorker(QObject):
                 is_playing=win_is_playing,
                 position=calc_position,
                 duration=duration,
-                thumbnail_bytes=self.current_thumb_bytes
+                thumbnail_bytes=self.current_thumb_bytes,
+                playback_rate=best.get("playback_rate", 1.0)
             )
             self.last_active_media_state = state
             return state

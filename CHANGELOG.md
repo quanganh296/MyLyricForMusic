@@ -1,5 +1,10 @@
 # Lịch sử cập nhật LyricNow
 
+## v1.0.10
+- **Bắt đúng nhịp & đúng câu hát khi mở app ở bất kỳ đoạn nào (kể cả MV dài hơn bản Audio):** Ưu tiên đối khớp chính xác thời lượng giữa video YouTube (như *Lỡ Say Bye Là Bye* MV `4:08` hay *Đừng Làm Trái Tim Anh Đau* MV `5:26`) với bản lời có cùng thời lượng MV thay vì chọn nhầm bản audio studio ngắn hơn 30–45 giây bị lệch nhịp.
+- **Tự cập nhật lại bản lời khớp thời lượng khi Chrome báo trễ `duration`:** Khi mới chuyển bài mà trình duyệt chưa kịp gửi độ dài video, app sẽ tự căn chỉnh lại ngay khi có thời lượng thật và tự làm mới cache cũ bị lệch thời lượng.
+- **Hỗ trợ tốc độ phát (`playback_rate`):** Đồng bộ chính xác cả khi bạn mở app giữa bài hoặc tăng/giảm tốc độ phát nhạc (1.25x, 1.5x...).
+
 ## v1.0.9
 - **Nút kéo âm lượng hình tròn mượt mà:** Thiết kế lại thanh âm lượng với nút kéo tròn mịn (khắc phục lỗi hiển thị ô vuông và lỗi số `%` đè lên thanh trượt khi thu nhỏ cửa sổ), màu thanh âm lượng đồng bộ theo tông màu video và hỗ trợ bấm chọn nhanh mức âm lượng.
 - **Tự động đồng bộ âm lượng theo thiết bị phát đang dùng (Loa máy / Tai nghe):** Tự động nhận diện khi chuyển đổi giữa loa máy tính và tai nghe Bluetooth / tai nghe dây, cập nhật thời gian thực mức âm lượng và trạng thái tắt tiếng (Mute) theo hệ thống Windows (sửa lỗi hiển thị `0%` khi đang nghe nhạc bằng tai nghe, đồng thời sửa lỗi nhận trạng thái Mute `GetMute`).

@@ -721,17 +721,19 @@ class LyricsProvider:
         # Version tag alignment (Solo Version, Acoustic, Live, Lofi, Remix, Demo...)
         score += self._version_match_score(req_title, res_title)
 
-        # Duration match bonus / mismatch penalty
+        # Duration match bonus / mismatch penalty (strongly favors exact MV-duration LRC over shorter studio LRC!)
         if target_dur and target_dur > 30.0 and item_dur and item_dur > 30.0:
             diff = abs(float(item_dur) - float(target_dur))
-            if diff <= 5.0:
+            if diff <= 4.0:
+                score += 280.0
+            elif diff <= 10.0:
                 score += 140.0
-            elif diff <= 15.0:
-                score += 75.0
-            elif diff > 75.0:
-                score -= 160.0
-            elif diff > 35.0:
-                score -= 70.0
+            elif diff <= 20.0:
+                score += 20.0
+            elif diff > 50.0:
+                score -= 220.0
+            elif diff > 25.0:
+                score -= 120.0
 
         # Anti-fragmentation & line completeness score
         if parsed_lines:
@@ -809,14 +811,26 @@ class LyricsProvider:
                 src = str(cached_data.get("source") or "")
                 is_manual = ("Manual" in src) or ("Custom" in src)
                 cached_dur = float(cached_data.get("track_duration") or 0.0)
-                dur_changed = (duration > 30.0 and cached_dur > 30.0 and abs(duration - cached_dur) > 15.0)
+                cached_src_dur = float(cached_data.get("source_duration") or 0.0)
+                cached_lines = cached_data.get("lines") or []
+                dur_changed = (duration > 30.0 and cached_dur > 30.0 and abs(duration - cached_dur) > 10.0)
+                # Auto-upgrade legacy/mismatched auto-cached studio lyrics when playing a longer Official MV (e.g. 248s MV vs 215s studio)
+                legacy_mv_mismatch = (
+                    (not is_manual)
+                    and (not cached_data.get("_best_dur_checked", False))
+                    and duration > 30.0
+                    and (
+                        (cached_src_dur > 30.0 and abs(cached_src_dur - duration) > 10.0)
+                        or (cached_src_dur <= 0.0 and cached_lines and (duration - float(cached_lines[-1]["time"])) > 28.0)
+                    )
+                )
                 cached_title_ok = is_manual or self.is_valid_match(title, cached_data.get("title", ""), req_artist=clean_a)
-                cached_script_ok = is_manual or self._is_lyric_script_compatible(title, cached_data.get("lines") or [])
+                cached_script_ok = is_manual or self._is_lyric_script_compatible(title, cached_lines)
                 req_is_remix = bool(re.search(r'(?i)\b(remix|bootleg|cover|live|lofi|slowed)\b', title or ""))
                 cached_unwanted_remix = (not is_manual) and (not req_is_remix) and bool(
                     re.search(r'(?i)\b(remix|bootleg|cover|lofi|slowed)\b', str(cached_data.get("title") or ""))
                 )
-                if cached_title_ok and cached_script_ok and (not cached_unwanted_remix) and (is_manual or (cached_data.get("has_real_timestamps", False) and not dur_changed)):
+                if cached_title_ok and cached_script_ok and (not cached_unwanted_remix) and (not legacy_mv_mismatch) and (is_manual or (cached_data.get("has_real_timestamps", False) and not dur_changed)):
                     # If cached entry has no user-saved offset yet, still check intro-trim alignment
                     if "sync_offset" not in cached_data and duration > 30.0:
                         self._apply_auto_intro_offset(cached_data, duration)
@@ -830,19 +844,45 @@ class LyricsProvider:
         data = None
         plain_fallback = None
 
-        if is_intl:
-            # Pass 1 (SYNCED ONLY): LRCLIB Exact -> LRCLIB Search (ranked!) -> NetEase CloudSearch -> ZingMP3
-            data, pf = self._fetch_lrclib_exact(exact_title_query, norm_a or clean_a, duration=duration, require_synced=True, req_title=title)
+        def _dur_diff(d_item):
+            if not d_item or duration <= 30.0:
+                return 9999.0
+            sd = float(d_item.get("source_duration") or 0.0)
+            return abs(sd - duration) if sd > 30.0 else 9999.0
+
+        def _search_best_lrclib():
+            """Checks LRCLIB candidates and picks the closest-duration high-quality synced LRC (crucial for Official MVs!)."""
+            nonlocal plain_fallback
+            best_lrc = None
+            best_lrc_diff = 9999.0
+
+            ex, pf = self._fetch_lrclib_exact(exact_title_query, norm_a or clean_a, duration=duration, require_synced=True, req_title=title)
             if pf and not plain_fallback:
                 plain_fallback = pf
+            if ex:
+                d_ex = _dur_diff(ex)
+                best_lrc = ex
+                best_lrc_diff = d_ex
+                if duration <= 30.0 or d_ex <= 6.0:
+                    return best_lrc
 
-            if not data:
-                for cand in candidates:
-                    data, pf = self._fetch_lrclib_search(cand, req_title=title, req_artist=clean_a, duration=duration, require_synced=True)
-                    if pf and not plain_fallback:
-                        plain_fallback = pf
-                    if data:
+            for cand in candidates:
+                res, pf = self._fetch_lrclib_search(cand, req_title=title, req_artist=clean_a, duration=duration, require_synced=True)
+                if pf and not plain_fallback:
+                    plain_fallback = pf
+                if res:
+                    d_res = _dur_diff(res)
+                    if best_lrc is None or d_res + 2.0 < best_lrc_diff:
+                        best_lrc = res
+                        best_lrc_diff = d_res
+                    # Stop immediately once we hit an exact-duration match (within 6s of YouTube video length!)
+                    if duration <= 30.0 or best_lrc_diff <= 6.0:
                         break
+            return best_lrc
+
+        if is_intl:
+            # Pass 1 (SYNCED ONLY): LRCLIB (duration-aligned!) -> NetEase CloudSearch -> ZingMP3
+            data = _search_best_lrclib()
             if not data:
                 for cand in candidates[:3]:
                     data = self._fetch_netease_search(cand, req_title=title, req_artist=clean_a)
@@ -850,31 +890,47 @@ class LyricsProvider:
                         break
             if not data:
                 for cand in candidates[:3]:
-                    data = self._fetch_zingmp3_search(cand, req_title=title, req_artist=clean_a, duration=duration)
-                    if data:
+                    z_res = self._fetch_zingmp3_search(cand, req_title=title, req_artist=clean_a, duration=duration)
+                    if z_res:
+                        z_res.pop("_artist_matched", None)
+                        data = z_res
                         break
         else:
-            # Pass 1 (SYNCED ONLY): ZingMP3 (strictly validated & artist-checked) -> LRCLIB -> NetEase -> weak ZingMP3 fallback
+            # Pass 1 (SYNCED ONLY): ZingMP3 (strictly artist & duration checked) -> LRCLIB (exact MV duration!) -> NetEase -> fallback
             zing_weak_fallback = None
+            zing_dur_mismatch_fallback = None
             for cand in candidates:
                 z_res = self._fetch_zingmp3_search(cand, req_title=title, req_artist=clean_a, duration=duration)
                 if z_res:
-                    if z_res.pop("_artist_matched", False):
-                        data = z_res
-                        break
+                    is_art = z_res.pop("_artist_matched", False)
+                    z_diff = _dur_diff(z_res)
+                    if is_art:
+                        # If playing an Official MV whose length differs from ZingMP3 studio audio by > 8s
+                        # (e.g. 248s MV vs 215s audio), check LRCLIB first for an exact 248s MV-synced LRC!
+                        if duration > 30.0 and z_diff > 8.0 and z_diff < 9000.0:
+                            if zing_dur_mismatch_fallback is None or z_diff < _dur_diff(zing_dur_mismatch_fallback):
+                                zing_dur_mismatch_fallback = z_res
+                        else:
+                            data = z_res
+                            break
                     elif not zing_weak_fallback:
                         zing_weak_fallback = z_res
+
             if not data:
-                data, pf = self._fetch_lrclib_exact(exact_title_query, norm_a or clean_a, duration=duration, require_synced=True, req_title=title)
-                if pf and not plain_fallback:
-                    plain_fallback = pf
-            if not data:
-                for cand in candidates:
-                    data, pf = self._fetch_lrclib_search(cand, req_title=title, req_artist=clean_a, duration=duration, require_synced=True)
-                    if pf and not plain_fallback:
-                        plain_fallback = pf
-                    if data:
-                        break
+                lrc_res = _search_best_lrclib()
+                if lrc_res:
+                    if zing_dur_mismatch_fallback:
+                        # Prefer LRCLIB if its duration matches the playing video significantly closer than ZingMP3!
+                        if _dur_diff(lrc_res) + 4.0 < _dur_diff(zing_dur_mismatch_fallback):
+                            data = lrc_res
+                        else:
+                            data = zing_dur_mismatch_fallback
+                    else:
+                        data = lrc_res
+
+            if not data and zing_dur_mismatch_fallback:
+                data = zing_dur_mismatch_fallback
+
             if not data:
                 for cand in candidates[:2]:
                     data = self._fetch_netease_search(cand, req_title=title, req_artist=clean_a)
@@ -888,6 +944,9 @@ class LyricsProvider:
             data = plain_fallback
 
         if data:
+            if duration > 30.0:
+                data["track_duration"] = round(float(duration), 1)
+                data["_best_dur_checked"] = True
             self._apply_auto_intro_offset(data, duration)
             if self.cache:
                 self.cache.set(title, clean_a, data)
@@ -968,10 +1027,10 @@ class LyricsProvider:
                             elif diff > 50.0:
                                 score -= 80.0
 
-                        valid_sugs.append((score, artist_matched, res_title, artists, lyric_url))
+                        valid_sugs.append((score, artist_matched, sug_dur, res_title, artists, lyric_url))
 
                 valid_sugs.sort(key=lambda x: x[0], reverse=True)
-                for _, is_art_match, res_title, artists, lyric_url in valid_sugs:
+                for _, is_art_match, sug_dur, res_title, artists, lyric_url in valid_sugs:
                     l_resp = requests.get(lyric_url, headers=self.headers, timeout=5)
                     if l_resp.status_code == 200 and l_resp.content:
                         lrc_text = l_resp.content.decode("utf-8", errors="replace").lstrip("\ufeff")
@@ -982,6 +1041,7 @@ class LyricsProvider:
                                 "artist": artists,
                                 "synced": True,
                                 "has_real_timestamps": True,
+                                "source_duration": round(float(sug_dur), 1) if sug_dur > 0 else 0.0,
                                 "lines": parsed,
                                 "raw_lrc": lrc_text,
                                 "source": "ZingMP3",
@@ -1015,13 +1075,14 @@ class LyricsProvider:
                             "artist": res.get("artistName", artist),
                             "synced": True,
                             "has_real_timestamps": True,
+                            "source_duration": round(float(res_dur), 1) if res_dur > 0 else 0.0,
                             "lines": parsed,
                             "raw_lrc": synced,
                             "source": "LRCLIB Exact"
                         }
-                        # If duration differs significantly (e.g. 4:39 Audio vs 5:26 Official MV),
+                        # If duration differs significantly (e.g. 3:35 Audio vs 4:08 Official MV),
                         # keep as fallback so ranked LRCLIB Search can find the exact-duration MV sync!
-                        if duration > 30.0 and res_dur > 30.0 and abs(res_dur - duration) > 20.0:
+                        if duration > 30.0 and res_dur > 30.0 and abs(res_dur - duration) > 8.0:
                             return None, synced_dict
                         return synced_dict, None
                 if plain:
@@ -1079,6 +1140,7 @@ class LyricsProvider:
                                         "artist": res_a,
                                         "synced": True,
                                         "has_real_timestamps": True,
+                                        "source_duration": round(float(item_dur), 1) if item_dur and item_dur > 0 else 0.0,
                                         "lines": parsed,
                                         "raw_lrc": synced,
                                         "source": "LRCLIB Search"

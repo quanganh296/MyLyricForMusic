@@ -246,6 +246,7 @@ class LyricOverlayWindow(QWidget):
         self._artwork_priority = 0  # 0=none, 1=valid GSMTC fallback, 2=YouTube HD artwork / video frame
         self._last_gsmtc_thumb_bytes = None
         self._prev_track_gsmtc_bytes = None
+        self._dur_recheck_key = None
         self.adaptive_palette = ThemeExtractor.DEFAULT_PALETTE.copy()
         self.translation_worker = None
         self._old_trans_workers = []
@@ -1562,10 +1563,38 @@ class LyricOverlayWindow(QWidget):
             self._trigger_translation_if_needed()
 
             # Snap immediately to the exact current playback line (including mid-song launches & auto-offset!)
+            self._dur_recheck_key = (new_title, int(round(track_dur / 5.0))) if track_dur > 30.0 else None
             self.update_lyric_display()
         else:
             if self.current_lyrics and not prev_req_artist and new_artist:
                 self.current_lyrics["req_artist"] = new_artist
+
+            # Handle Chrome delayed duration update (Tick 0 reported duration=0 or previous video's duration,
+            # then 1s later Chrome reports real Official MV duration like 248.2s -> upgrade to exact MV-synced LRC!)
+            cur_dur = float(getattr(media_state, "duration", 0.0) or 0.0)
+            if self.current_lyrics and cur_dur > 30.0:
+                src_str = str(self.current_lyrics.get("source") or "")
+                is_manual = ("Manual" in src_str) or ("Custom" in src_str)
+                recheck_key = (new_title, int(round(cur_dur / 5.0)))
+                if not is_manual and recheck_key != self._dur_recheck_key:
+                    fetched_dur = float(self.current_lyrics.get("track_duration") or 0.0)
+                    if fetched_dur <= 30.0 or abs(fetched_dur - cur_dur) > 10.0:
+                        self._dur_recheck_key = recheck_key
+                        print(f"[Overlay] Re-aligning lyrics to real video duration ({cur_dur:.1f}s) for: {new_title}")
+                        better = self.lyrics_provider.fetch_lyrics(new_title, new_artist, duration=cur_dur)
+                        if better and better.get("lines"):
+                            better["req_title"] = new_title
+                            better["req_artist"] = new_artist
+                            self.current_lyrics = better
+                            self.current_line_index = -99
+                            self.settings["sync_offset"] = float(better.get("sync_offset", 0.0) or 0.0)
+                            self.lbl_active_romaji.setText("")
+                            self.lbl_active_romaji.setVisible(False)
+                            self.lbl_active_trans.setText("")
+                            self.lbl_active_trans.setVisible(False)
+                            self.update_lyric_display()
+                            self._trigger_translation_if_needed()
+
             # Only consider GSMTC thumbnail while no higher-priority YouTube video artwork is loaded
             self._maybe_apply_gsmtc_thumbnail(media_state.thumbnail_bytes)
 

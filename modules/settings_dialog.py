@@ -186,7 +186,7 @@ class SettingsDialog(QDialog):
         self.combo_mode = QComboBox()
         self.combo_mode.addItems([
             "Mode 1: Video bên phải + Lyric bên trái (Nền mờ & Màu tự động)",
-            "Mode 2: Chỉ hiện Lyric ở giữa (Thu nhỏ / Phóng to linh hoạt)"
+            "Mode 2: Chỉ hiện Lyric ở giữa (Nền mờ & Màu tự động theo video)"
         ])
         curr_mode = int(self.settings.get("display_mode", 1))
         self.combo_mode.setCurrentIndex(0 if curr_mode == 1 else 1)

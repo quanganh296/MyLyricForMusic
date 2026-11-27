@@ -244,7 +244,7 @@ class LyricOverlayWindow(QWidget):
 
         self.btn_mode2 = QPushButton(" Lyric")
         self.btn_mode2.setIcon(IconFactory.create_icon("align_center", "#ffffff", 14))
-        self.btn_mode2.setToolTip("Mode 2: Chỉ hiện Lyric ở giữa tab (có thể thu nhỏ / phóng to)")
+        self.btn_mode2.setToolTip("Mode 2: Chỉ hiện Lyric ở giữa tab (nền mờ & màu tự động theo video, thu phóng linh hoạt)")
         self.btn_mode2.setFixedHeight(24)
         self.btn_mode2.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_mode2.clicked.connect(lambda: self.set_display_mode(2))
@@ -622,13 +622,13 @@ class LyricOverlayWindow(QWidget):
         self.btn_mode1.setIcon(IconFactory.create_icon("film", "#09090b" if is_m1 else "#ffffff", 13))
         self.btn_mode2.setIcon(IconFactory.create_icon("align_center", "#09090b" if not is_m1 else "#ffffff", 13))
 
-        # Show/hide mode-specific widgets
+        # Show/hide mode-specific widgets (blurred video backdrop & adaptive theme enabled in BOTH Mode 1 and Mode 2!)
         self.video_display.setVisible(is_m1)
         self.btn_fullscreen.setVisible(is_m1)
         self.btn_zoom_out.setVisible(not is_m1)
         self.btn_zoom_in.setVisible(not is_m1)
         self.btn_compact.setVisible(not is_m1)
-        self.container.set_blurred_mode(is_m1)
+        self.container.set_blurred_mode(True)
 
         if is_m1:
             self.setMinimumSize(620, 300)
@@ -636,15 +636,17 @@ class LyricOverlayWindow(QWidget):
                 target_w = max(720, int(self.settings.get("mode1_w", 940)))
                 target_h = max(340, int(self.settings.get("mode1_h", 430)))
                 self.resize(target_w, target_h)
-            # Load video & blurred theme for current track if available
-            self._trigger_mode1_media_load()
+            # Load full video stream + blurred theme for current track
+            self._trigger_track_media_load()
         else:
             self.setMinimumSize(280, 68)
+            # Stop MP4 video decoding to save CPU while keeping blurred backdrop & fetching HD artwork if needed
             self.video_display.stop_video(clear_artwork=False)
             if resize_window:
                 target_w = max(360, int(self.settings.get("win_w", 680)))
                 target_h = max(120, int(self.settings.get("win_h", 195)))
                 self.resize(target_w, target_h)
+            self._trigger_track_media_load()
 
         # Refresh lyric line visibility & text
         self._refresh_visible_lines()
@@ -659,8 +661,7 @@ class LyricOverlayWindow(QWidget):
         self.video_display.set_border_color(QColor(255, 255, 255, 65))
         if clear_display:
             self.video_display.stop_video(clear_artwork=True)
-        if self.display_mode == 1:
-            self.apply_settings(self.settings)
+        self.apply_settings(self.settings)
 
     def _maybe_apply_gsmtc_thumbnail(self, thumb_bytes: bytes):
         """
@@ -686,16 +687,22 @@ class LyricOverlayWindow(QWidget):
 
         self.current_thumb_bytes = thumb_bytes
         self._artwork_priority = 1
-        if self.display_mode == 1:
-            self._update_adaptive_theme_from_source(thumb_bytes)
-            if self.video_display.fallback_pixmap.isNull():
-                self.video_display.set_fallback_artwork(thumb_bytes)
+        self._update_adaptive_theme_from_source(thumb_bytes)
+        if self.video_display.fallback_pixmap.isNull():
+            self.video_display.set_fallback_artwork(thumb_bytes)
 
-    def _trigger_mode1_media_load(self):
-        if self.display_mode != 1:
-            return
+    def _trigger_track_media_load(self):
+        """
+        Loads real YouTube HD video artwork (in Mode 2 artwork_only=True, zero video decoding)
+        or full synchronized video stream + HD artwork (in Mode 1).
+        """
+        artwork_only = (self.display_mode != 1)
         if self.current_thumb_bytes and self._artwork_priority >= 1 and self.container.bg_pixmap.isNull():
             self._update_adaptive_theme_from_source(self.current_thumb_bytes)
+
+        # In Mode 2, if we already have high-priority HD artwork for this track, no need to re-fetch
+        if artwork_only and self._artwork_priority >= 2:
+            return
 
         req_token = str(self._track_gen)
         if self.current_media_state and self.current_media_state.title:
@@ -707,6 +714,7 @@ class LyricOverlayWindow(QWidget):
                 position_sec=self.current_media_state.get_current_position(),
                 is_playing=self.current_media_state.is_playing,
                 req_token=req_token,
+                artwork_only=artwork_only,
             )
         elif self.current_lyrics and self.current_lyrics.get("title"):
             self._current_video_req_key = self.video_display.load_track(
@@ -717,7 +725,11 @@ class LyricOverlayWindow(QWidget):
                 position_sec=0.0,
                 is_playing=False,
                 req_token=req_token,
+                artwork_only=artwork_only,
             )
+
+    def _trigger_mode1_media_load(self):
+        self._trigger_track_media_load()
 
     def _on_hd_artwork_ready(self, req_key: str, img_bytes: bytes):
         if not img_bytes:
@@ -726,8 +738,7 @@ class LyricOverlayWindow(QWidget):
             return
         self.current_thumb_bytes = img_bytes
         self._artwork_priority = 2
-        if self.display_mode == 1:
-            self._update_adaptive_theme_from_source(img_bytes)
+        self._update_adaptive_theme_from_source(img_bytes)
 
     def _on_video_frame_artwork_ready(self, req_key: str, qimg):
         if qimg is None or qimg.isNull():
@@ -737,8 +748,7 @@ class LyricOverlayWindow(QWidget):
         if self._artwork_priority >= 2:
             return
         self._artwork_priority = 2
-        if self.display_mode == 1:
-            self._update_adaptive_theme_from_source(qimg)
+        self._update_adaptive_theme_from_source(qimg)
 
     def _update_adaptive_theme_from_source(self, source):
         if source is None:
@@ -756,8 +766,7 @@ class LyricOverlayWindow(QWidget):
         c = QColor(palette.get("accent_hex", "#ffffff"))
         c.setAlpha(110)
         self.video_display.set_border_color(c)
-        if self.display_mode == 1:
-            self.apply_settings(self.settings)
+        self.apply_settings(self.settings)
 
     def _update_adaptive_theme_from_bytes(self, img_bytes: bytes):
         self._update_adaptive_theme_from_source(img_bytes)
@@ -861,25 +870,32 @@ class LyricOverlayWindow(QWidget):
             container_radius = "0px" if self.is_fullscreen else "14px"
             active_font_size = max(24, font_size + 10) if self.is_fullscreen else max(18, font_size + 2)
         else:
-            # Mode 2: Centered lyric-only tab with user-chosen color & dark glass backdrop
+            # Mode 2: Centered lyric-only tab with the SAME blurred video backdrop & adaptive color as Mode 1!
             align_flags = Qt.AlignmentFlag.AlignCenter
             if align_mode == 1:
                 align_flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
             elif align_mode == 2:
                 align_flags = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
 
-            color_hi = settings.get("color_highlight", "#38bdf8")
-            color_sub = "#ffffff"
-            color_far = "rgba(255, 255, 255, 0.5)"
-            accent_hex = "#38bdf8"
+            has_blur = not self.container.bg_pixmap.isNull()
+            if has_blur or self._artwork_priority >= 1:
+                color_hi = self.adaptive_palette.get("active_color", "#7dd3fc")
+                color_sub = self.adaptive_palette.get("sub_color", "rgba(255, 255, 255, 0.78)")
+                color_far = self.adaptive_palette.get("far_color", "rgba(255, 255, 255, 0.42)")
+                accent_hex = self.adaptive_palette.get("accent_hex", "#38bdf8")
+            else:
+                color_hi = settings.get("color_highlight", "#38bdf8")
+                color_sub = "#ffffff"
+                color_far = "rgba(255, 255, 255, 0.5)"
+                accent_hex = "#38bdf8"
 
             self.lbl_prev2.setVisible(False)
             self.lbl_prev.setVisible(line_mode == 2)
             self.lbl_next.setVisible(line_mode >= 1)
             self.lbl_next2.setVisible(False)
 
-            container_bg = f"rgba(15, 23, 42, {bg_opacity:.2f})"
-            container_border = "1px solid rgba(255, 255, 255, 0.15)"
+            container_bg = "transparent" if has_blur else f"rgba(15, 23, 42, {bg_opacity:.2f})"
+            container_border = "none" if has_blur else "1px solid rgba(255, 255, 255, 0.15)"
             container_radius = "14px"
             active_font_size = font_size
 
@@ -1382,9 +1398,8 @@ class LyricOverlayWindow(QWidget):
             # Apply GSMTC thumbnail only if genuinely fresh and not a Chrome/Google logo
             self._maybe_apply_gsmtc_thumbnail(media_state.thumbnail_bytes)
 
-            # Start fetching the real YouTube video & HD thumbnail in background immediately (in parallel with lyrics)
-            if self.display_mode == 1:
-                self._trigger_mode1_media_load()
+            # Start fetching the real YouTube HD artwork (and video stream in Mode 1) in parallel with lyrics
+            self._trigger_track_media_load()
 
             self.current_line_index = -99
             track_dur = float(getattr(media_state, "duration", 0.0) or 0.0)
@@ -1404,9 +1419,9 @@ class LyricOverlayWindow(QWidget):
                     "lines": [{"time": 0.0, "text": "Không tìm thấy lời bài hát tự động. Nhấn nút kính lúp để tìm thủ công."}]
                 }
 
-            # If cached lyrics carried an explicit YouTube video_id, align Mode 1 to that exact video
-            if self.display_mode == 1 and self.current_video_id:
-                self._trigger_mode1_media_load()
+            # If cached lyrics carried an explicit YouTube video_id, align artwork/video to that exact video
+            if self.current_video_id:
+                self._trigger_track_media_load()
 
             # Trigger async background auto-detection, romanization & translation
             self.lbl_active_romaji.setText("")
@@ -1472,13 +1487,12 @@ class LyricOverlayWindow(QWidget):
                 if resp.status_code == 200 and len(resp.content) > 1500:
                     self.current_thumb_bytes = resp.content
                     self._artwork_priority = 2
-                    if self.display_mode == 1:
-                        self._update_adaptive_theme_from_source(self.current_thumb_bytes)
+                    self._update_adaptive_theme_from_source(self.current_thumb_bytes)
             except Exception:
                 pass
 
-        if self.display_mode == 1 and (custom_vid or thumb_url or not self.current_media_state):
-            self._trigger_mode1_media_load()
+        if custom_vid or thumb_url or not self.current_media_state:
+            self._trigger_track_media_load()
 
         # Clear old translation/romaji first, snap visible lyrics immediately, then trigger fresh translation!
         self.lbl_active_romaji.setText("")

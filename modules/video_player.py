@@ -14,13 +14,14 @@ class VideoStreamResolver(QThread):
     resolved = Signal(str, str, str, bytes)  # req_key, video_id, stream_url, thumb_bytes
     failed = Signal(str, str)                # req_key, reason
 
-    def __init__(self, req_key: str, title: str, artist: str = "", video_id: str = None, need_audio: bool = False):
+    def __init__(self, req_key: str, title: str, artist: str = "", video_id: str = None, need_audio: bool = False, artwork_only: bool = False):
         super().__init__()
         self.req_key = req_key
         self.title = title
         self.artist = artist
         self.video_id = video_id
         self.need_audio = need_audio
+        self.artwork_only = artwork_only
         self._cancelled = False
 
     def cancel(self):
@@ -72,6 +73,10 @@ class VideoStreamResolver(QThread):
         if thumb_bytes:
             # Deliver real HD YouTube thumbnail immediately (~0.3s) without waiting for yt-dlp!
             self.artwork_fetched.emit(self.req_key, thumb_bytes)
+
+        # In Mode 2 (Lyric-only), only fetch the HD video artwork without downloading/decoding MP4 stream!
+        if self.artwork_only:
+            return
 
         try:
             import yt_dlp
@@ -129,6 +134,7 @@ class RoundedVideoDisplay(QWidget):
         self.resolver = None
         self._old_resolvers = []
         self.is_stream_loaded = False
+        self._artwork_only_mode = False
         self._has_hd_artwork = False
         self._emitted_frame_artwork = False
         self._frame_check_count = 0
@@ -169,17 +175,22 @@ class RoundedVideoDisplay(QWidget):
 
     def load_track(self, title: str, artist: str = "", thumb_bytes: bytes = None,
                    video_id: str = None, position_sec: float = 0.0, is_playing: bool = False,
-                   req_token: str = ""):
+                   req_token: str = "", artwork_only: bool = False):
         req_key = f"{req_token}|{video_id or ''}|{title}|{artist}"
-        if req_key == self.current_req_key and (self.is_stream_loaded or (self.resolver and self.resolver.isRunning())):
-            return req_key
+        same_track = (req_key == self.current_req_key)
+        if same_track:
+            if artwork_only and (self._has_hd_artwork or self.is_stream_loaded or (self.resolver and self.resolver.isRunning())):
+                return req_key
+            if not artwork_only and (self.is_stream_loaded or (self.resolver and self.resolver.isRunning() and not self._artwork_only_mode)):
+                return req_key
 
-        self.stop_video(clear_artwork=True)
+        self.stop_video(clear_artwork=(not same_track))
         self.current_req_key = req_key
+        self._artwork_only_mode = artwork_only
         self.pending_seek_sec = max(0.0, position_sec)
         self.pending_playing = is_playing
         self.is_stream_loaded = False
-        self._has_hd_artwork = False
+        self._has_hd_artwork = bool(same_track and not self.fallback_pixmap.isNull())
         self._emitted_frame_artwork = False
         self._frame_check_count = 0
         self.current_frame_img = QImage()
@@ -187,15 +198,17 @@ class RoundedVideoDisplay(QWidget):
         if thumb_bytes:
             self.set_fallback_artwork(thumb_bytes)
 
-        if not MULTIMEDIA_AVAILABLE or not title:
+        if not title or (not artwork_only and not MULTIMEDIA_AVAILABLE):
             self.status_text = ""
             self.update()
             return req_key
 
-        self.status_text = "Đang tải video..."
+        self.status_text = "" if artwork_only else "Đang tải video..."
         self.update()
 
-        self.resolver = VideoStreamResolver(req_key, title, artist, video_id=video_id, need_audio=False)
+        self.resolver = VideoStreamResolver(
+            req_key, title, artist, video_id=video_id, need_audio=False, artwork_only=artwork_only
+        )
         self.resolver.artwork_fetched.connect(self._on_artwork_fetched)
         self.resolver.resolved.connect(self._on_stream_resolved)
         self.resolver.failed.connect(self._on_stream_failed)
@@ -325,6 +338,7 @@ class RoundedVideoDisplay(QWidget):
             self.player.setSource(QUrl())
 
         self.is_stream_loaded = False
+        self._artwork_only_mode = False
         self._has_hd_artwork = False
         self._emitted_frame_artwork = False
         self._frame_check_count = 0

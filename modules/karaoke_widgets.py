@@ -6,6 +6,7 @@ from modules.qt_compat import (
     QPen, QRect, QRectF, QSize, QSizePolicy
 )
 from modules.icon_factory import IconFactory
+from modules.i18n import tr
 
 
 _CJK_CHAR_RE = re.compile(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\u0e00-\u0e7f]')
@@ -185,6 +186,7 @@ class ModeDropdownButton(QPushButton):
         super().__init__(parent)
         self._mode = 1
         self._accent_hex = "#38bdf8"
+        self._app_lang = "vi"
         self._hovered = False
         self.setFixedHeight(26)
         self.setMinimumWidth(94)
@@ -194,15 +196,25 @@ class ModeDropdownButton(QPushButton):
         self.setStyleSheet("background: transparent; border: none;")
         self.clicked.connect(self._open_menu)
 
+    def _mode_label(self, mode_id: int) -> str:
+        return tr(self._app_lang, f"mode_{mode_id}_name")
+
+    def _mode_desc(self, mode_id: int) -> str:
+        return tr(self._app_lang, f"mode_{mode_id}_desc")
+
+    def set_language(self, lang: str):
+        self._app_lang = lang or "vi"
+        self.set_mode_state(self._mode, self._accent_hex)
+
     def set_mode_state(self, mode: int, accent_hex: str = None):
         self._mode = mode if mode in (1, 2, 3) else 1
         if accent_hex:
             self._accent_hex = accent_hex
-        label, _, tip = self.MODE_META[self._mode]
-        self.setToolTip(f"Đang chọn {label} — Nhấn để đổi chế độ hiển thị")
-        # Size neatly to fit label + icon + chevron
+        label = self._mode_label(self._mode)
+        self.setToolTip(tr(self._app_lang, "mode_dropdown_tip", label=label))
+        # Size neatly to fit label + icon + chevron across Latin & CJK languages
         fm = QFontMetrics(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        needed = fm.horizontalAdvance(label) + 46
+        needed = fm.horizontalAdvance(label) + 48
         self.setFixedWidth(max(92, needed))
         self.update()
 
@@ -243,9 +255,12 @@ class ModeDropdownButton(QPushButton):
             }}
         """)
 
+        sel_tag = tr(self._app_lang, "mode_selected_tag")
         for m_id in (1, 2, 3):
-            name, icon_key, desc = self.MODE_META[m_id]
-            label_txt = f" {name}  (Đang chọn)" if m_id == self._mode else f" {name}"
+            _, icon_key, _ = self.MODE_META[m_id]
+            name = self._mode_label(m_id)
+            desc = self._mode_desc(m_id)
+            label_txt = f" {name}  {sel_tag}" if m_id == self._mode else f" {name}"
             act = menu.addAction(
                 IconFactory.create_icon(icon_key, accent if m_id == self._mode else "#cbd5e1", 14),
                 label_txt
@@ -272,7 +287,8 @@ class ModeDropdownButton(QPushButton):
         painter.setBrush(bg)
         painter.drawRoundedRect(rect, 6.0, 6.0)
 
-        label, icon_key, _ = self.MODE_META[self._mode]
+        _, icon_key, _ = self.MODE_META[self._mode]
+        label = self._mode_label(self._mode)
         fg = QColor("#09090b")
 
         # Left icon

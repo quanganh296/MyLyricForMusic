@@ -6,6 +6,7 @@ from modules.qt_compat import (
     QTabWidget, QTextEdit, QWidget, QLabel, QFrame, QApplication
 )
 from modules.icon_factory import IconFactory
+from modules.i18n import tr
 
 class SearchDialog(QDialog):
     lyric_selected = Signal(dict) # Emits selected lyric data dict
@@ -13,7 +14,8 @@ class SearchDialog(QDialog):
     def __init__(self, lyrics_provider, initial_query="", parent=None):
         super().__init__(parent)
         self.provider = lyrics_provider
-        self.setWindowTitle("Tìm kiếm & Dán Lời Bài Hát - LyricNow")
+        self.app_lang = parent.settings.get("app_lang", "vi") if (parent and hasattr(parent, "settings")) else "vi"
+        self.setWindowTitle(tr(self.app_lang, "search_title"))
         self.resize(650, 580)
         self.setMinimumSize(540, 460)
 
@@ -51,17 +53,17 @@ class SearchDialog(QDialog):
         t1_layout.setSpacing(10)
         t1_layout.setContentsMargins(10, 10, 10, 10)
 
-        info_lbl = QLabel("Nhập tên bài hát, ca sĩ hoặc dán trực tiếp link video YouTube:")
+        info_lbl = QLabel(tr(self.app_lang, "search_online_lbl"))
         info_lbl.setWordWrap(True)
         t1_layout.addWidget(info_lbl)
 
         search_box = QHBoxLayout()
         self.query_input = QLineEdit(self.clean_query)
-        self.query_input.setPlaceholderText("VD: Vết Thương - Fishy hoặc https://youtu.be/...")
+        self.query_input.setPlaceholderText("VD: Vết Thương - Fishy / https://youtu.be/...")
         self.query_input.returnPressed.connect(self.do_search)
         search_box.addWidget(self.query_input)
 
-        self.btn_search = QPushButton(" Tìm trực tuyến")
+        self.btn_search = QPushButton(tr(self.app_lang, "search_btn"))
         self.btn_search.setIcon(IconFactory.create_icon("search", "#09090b"))
         self.btn_search.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_search.clicked.connect(self.do_search)
@@ -81,16 +83,16 @@ class SearchDialog(QDialog):
         self.txt_preview_online = QTextEdit()
         self.txt_preview_online.setReadOnly(True)
         self.txt_preview_online.setFixedHeight(96)
-        self.txt_preview_online.setPlaceholderText("Bấm vào một phiên bản ở danh sách trên để xem trước nội dung lời bài hát...")
+        self.txt_preview_online.setPlaceholderText(tr(self.app_lang, "search_preview_ph"))
         t1_layout.addWidget(self.txt_preview_online)
 
-        self.btn_apply_online = QPushButton(" Áp dụng lời bài hát đã chọn")
+        self.btn_apply_online = QPushButton(tr(self.app_lang, "search_apply_btn"))
         self.btn_apply_online.setIcon(IconFactory.create_icon("check", "#09090b"))
         self.btn_apply_online.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_apply_online.clicked.connect(self.on_apply_clicked)
         t1_layout.addWidget(self.btn_apply_online)
 
-        self.tabs.addTab(tab_search, IconFactory.create_icon("search", "#38bdf8"), "Tìm kiếm Trực tuyến")
+        self.tabs.addTab(tab_search, IconFactory.create_icon("search", "#38bdf8"), tr(self.app_lang, "search_tab_online"))
 
         # ========================================================
         # TAB 2: Tìm theo Link YouTube (URL)
@@ -100,23 +102,23 @@ class SearchDialog(QDialog):
         t_yt_layout.setSpacing(10)
         t_yt_layout.setContentsMargins(10, 10, 10, 10)
 
-        yt_info_lbl = QLabel("Dán đường link (URL) video YouTube để tự động lấy tên bài hát & tìm lời chuẩn:")
+        yt_info_lbl = QLabel(tr(self.app_lang, "search_yt_lbl"))
         yt_info_lbl.setWordWrap(True)
         t_yt_layout.addWidget(yt_info_lbl)
 
         yt_box = QHBoxLayout()
         self.yt_url_input = QLineEdit()
-        self.yt_url_input.setPlaceholderText("https://www.youtube.com/watch?v=... hoặc https://youtu.be/...")
+        self.yt_url_input.setPlaceholderText("https://www.youtube.com/watch?v=... / https://youtu.be/...")
         self.yt_url_input.returnPressed.connect(self.do_search_youtube_url)
         yt_box.addWidget(self.yt_url_input)
 
-        btn_paste_clip = QPushButton(" Dán Link")
+        btn_paste_clip = QPushButton(tr(self.app_lang, "search_paste_link"))
         btn_paste_clip.setIcon(IconFactory.create_icon("paste", "#09090b"))
         btn_paste_clip.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_paste_clip.clicked.connect(self.paste_from_clipboard)
         yt_box.addWidget(btn_paste_clip)
 
-        self.btn_yt_search = QPushButton(" Tìm Lời Video")
+        self.btn_yt_search = QPushButton(tr(self.app_lang, "search_yt_btn"))
         self.btn_yt_search.setIcon(IconFactory.create_icon("search", "#09090b"))
         self.btn_yt_search.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_yt_search.clicked.connect(self.do_search_youtube_url)
@@ -192,13 +194,13 @@ class SearchDialog(QDialog):
         self.txt_preview_yt.setPlaceholderText("Bấm vào một phiên bản ở trên để xem trước lời bài hát...")
         t_yt_layout.addWidget(self.txt_preview_yt)
 
-        self.btn_apply_yt = QPushButton(" Áp dụng phiên bản đã chọn")
+        self.btn_apply_yt = QPushButton(tr(self.app_lang, "search_yt_apply"))
         self.btn_apply_yt.setIcon(IconFactory.create_icon("check", "#09090b"))
         self.btn_apply_yt.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_apply_yt.clicked.connect(self.on_apply_yt_clicked)
         t_yt_layout.addWidget(self.btn_apply_yt)
 
-        self.tabs.addTab(tab_yt, IconFactory.create_icon("youtube", "#f43f5e"), "Tìm theo Link YouTube")
+        self.tabs.addTab(tab_yt, IconFactory.create_icon("youtube", "#f43f5e"), tr(self.app_lang, "search_tab_yt"))
 
         # ========================================================
         # TAB 3: Dán Lời Bài Hát Thủ Công
@@ -208,31 +210,28 @@ class SearchDialog(QDialog):
         t2_layout.setSpacing(8)
         t2_layout.setContentsMargins(10, 10, 10, 10)
 
-        paste_info = QLabel("Dán lời bài hát (tự động phân bổ thời gian trôi lời mượt mà cho cả văn bản thường):")
+        paste_info = QLabel(tr(self.app_lang, "search_paste_lbl"))
         paste_info.setWordWrap(True)
         t2_layout.addWidget(paste_info)
 
         self.txt_custom_lyrics = QTextEdit()
         self.txt_custom_lyrics.setPlaceholderText(
-            "Dán lời bài hát từ Google / Genius vào đây...\n\n"
-            "Ví dụ:\n"
-            "Ngồi ngẩn ngơ, anh hát vu vơ những bản tình ca năm ấy...\n"
-            "Có đôi lần khẽ cười vì anh chợt nhớ người làm anh say..."
+            "Paste lyrics here..."
         )
         t2_layout.addWidget(self.txt_custom_lyrics)
 
-        btn_apply_custom = QPushButton(" Lưu & Áp dụng lời vừa dán")
+        btn_apply_custom = QPushButton(tr(self.app_lang, "search_paste_save"))
         btn_apply_custom.setIcon(IconFactory.create_icon("save", "#09090b"))
         btn_apply_custom.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_apply_custom.clicked.connect(self.on_apply_custom_lyrics)
         t2_layout.addWidget(btn_apply_custom)
 
-        self.tabs.addTab(tab_paste, IconFactory.create_icon("edit", "#38bdf8"), "Dán Lời Thủ Công")
+        self.tabs.addTab(tab_paste, IconFactory.create_icon("edit", "#38bdf8"), tr(self.app_lang, "search_tab_paste"))
 
         layout.addWidget(self.tabs)
 
         # Bottom Cancel
-        btn_cancel = QPushButton(" Đóng")
+        btn_cancel = QPushButton(tr(self.app_lang, "btn_close"))
         btn_cancel.setIcon(IconFactory.create_icon("close", "#09090b"))
         btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_cancel.clicked.connect(self.reject)

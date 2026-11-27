@@ -1,5 +1,10 @@
 # Lịch sử cập nhật LyricNow
 
+## v1.1.3
+- **Sửa triệt để lỗi nhận sai lời & dịch sai ngôn ngữ (VD: nhạc Nhật/Hàn/Trung bị nhận nhầm sang bản Tiếng Anh trùng tên):** Khóa ưu tiên khớp ca sĩ (từ cả tên kênh lẫn tên video YouTube như `Michita ft 愛海`) và kiểm tra tương thích hệ chữ trước khi so thời lượng, tự động làm mới cache cũ bị khớp sai ca sĩ.
+- **Khóa đúng video YouTube khi bật/tắt nút `Video` trong Mode Karaoke:** Chấm điểm chọn chính xác video đang phát theo tiêu đề + tên kênh + thời lượng, khóa `video_id` và lưu đệm luồng phát để khi bật/tắt `Video` trong Mode 3 luôn giữ nguyên đúng video đó mà không tự tìm sang video khác.
+- **Bổ sung Ngôn ngữ ứng dụng (App Language) trong Cài đặt:** Hỗ trợ chuyển đổi trực tiếp giao diện ứng dụng sang **Tiếng Việt, English, 日本語 (Tiếng Nhật), 中文 (Tiếng Trung), 한국어 (Tiếng Hàn), ภาษาไทย, Español, Français** và mở rộng thêm các ngôn ngữ đích khi dịch lời bài hát.
+
 ## v1.1.2
 - **Hiển thị tên bài hát thông minh & tự di chuyển mượt mà:** Khi có khung **Video** (Mode 1 hoặc Mode 3 bật Video), tên bài hát tự động hiển thị căn giữa ngay bên dưới khung video; khi chuyển sang chế độ chỉ có lời (**Mode 2 Lyric** hoặc **Mode 3 tắt Video**), tên bài hát tự trượt mượt lên đầu cửa sổ ở chính giữa (`Center`) còn phần lời nhạc nằm gọn phía dưới.
 - **Kiểm tra & bắt buộc cập nhật khi có phiên bản mới:** Ứng dụng tự động kiểm tra bản phát hành mới nhất từ GitHub; nếu đang chạy phiên bản cũ sẽ hiển thị thông báo bắt buộc cập nhật (kèm danh sách thay đổi và nút tải/cập nhật tự động 1 chạm) thay vì cho dùng tiếp bản cũ.

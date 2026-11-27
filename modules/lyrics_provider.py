@@ -447,27 +447,77 @@ class LyricsProvider:
         r'(?i)(?:[\|\-–—\(\[]\s*)?\b(?:ep|album|mixtape|mini\s*album|playlist|tracklist)\b.*$'
     )
 
-    def _is_lyric_script_compatible(self, req_title: str, parsed_lines: list) -> bool:
+    def _is_lyric_script_compatible(self, req_title: str, parsed_lines: list, artist_matched: bool = True) -> bool:
         """
-        Prevents a Vietnamese-titled song from accepting Korean/Japanese/Chinese lyrics
-        (e.g. '3. Nắng có mang em về | EP "Luv"' must never match Korean Apink 'LUV').
+        Guards against cross-language wrong-song matches:
+        1) A clearly Vietnamese song title must never accept CJK lyrics (e.g. EP 'Luv' -> Korean Apink).
+        2) A title containing CJK/Japanese/Korean characters (e.g. 'Cry for me - Michita ft 愛海')
+           must never accept pure-Latin lyrics from an UNRELATED artist (e.g. 'Violet Skies').
         """
         if not req_title or not parsed_lines:
             return True
-        # Only enforce when the requested title is clearly Vietnamese (has VN diacritics, no CJK, no foreign hint)
-        if not self._VI_DIACRITIC_RE.search(req_title):
-            return True
-        if self._has_intl_script(req_title) or self._FOREIGN_HINT_RE.search(req_title):
-            return True
 
-        sample = "".join((l.get("text") or "") for l in parsed_lines[:15])
+        sample = "".join((l.get("text") or "") for l in parsed_lines[:18])
         non_ws = re.sub(r'\s+', '', sample)
         if len(non_ws) < 10:
             return True
         cjk_hits = len(self._INTL_SCRIPT_RE.findall(non_ws))
-        if cjk_hits >= 12 and (cjk_hits / len(non_ws)) >= 0.25:
-            return False
+
+        # Guard 1: Vietnamese title (no CJK, no foreign hint) must not accept CJK lyrics
+        if self._VI_DIACRITIC_RE.search(req_title) and not self._has_intl_script(req_title) and not self._FOREIGN_HINT_RE.search(req_title):
+            if cjk_hits >= 12 and (cjk_hits / len(non_ws)) >= 0.25:
+                return False
+
+        # Guard 2: CJK/international-script title with NO artist match must not accept pure-Latin wrong-artist lyrics
+        if (not artist_matched) and self._has_intl_script(req_title):
+            if cjk_hits < 3:
+                return False
+
         return True
+
+    def _extract_expected_artist_tokens(self, req_title: str, req_artist: str = "", res_title: str = "") -> tuple:
+        """
+        Extracts meaningful artist tokens from BOTH req_artist (channel/artist) and non-title parts
+        of req_title (e.g. 'Michita', '愛海' from 'vietsub + lyrics | Cry for me - Michita ft 愛海').
+        Returns (title_artist_tokens, channel_artist_tokens).
+        """
+        stop_meta = {
+            'official', 'music', 'video', 'lyric', 'lyrics', 'vietsub', 'engsub', 'feat',
+            'featuring', 'topic', 'audio', 'full', 'track', 'version', 'ver', 'remix',
+            'cover', 'live', 'acoustic', 'solo', 'demo', 'piano', 'lofi', 'slowed',
+            'karaoke', 'ost', 'hd', '4k', 'mv', 'pv', 'amv', 'romaji', 'pinyin', 'sub',
+            'channel', 'entertainment', 'records', 'studio', 'production', 'media',
+            'nhac', 'phim', 'the', 'and', 'for', 'you', 'with', 'from', 'this', 'that'
+        }
+        tok_pat = re.compile(r'[a-z0-9]{3,}|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]{2,}')
+
+        res_title_toks = set(tok_pat.findall(self._fold_latin(res_title or "")))
+        raw_title_toks = set(tok_pat.findall(self._fold_latin(req_title or "")))
+        raw_title_cjk = set(re.findall(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]{2,}', req_title or ""))
+        res_title_cjk = set(re.findall(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]{2,}', res_title or ""))
+
+        title_artist_toks = (raw_title_toks - res_title_toks - stop_meta) | (raw_title_cjk - res_title_cjk)
+        norm_a = self._normalize_artist(req_artist or "")
+        chan_toks = (set(tok_pat.findall(self._fold_latin(norm_a))) - stop_meta) | set(
+            re.findall(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]{2,}', norm_a)
+        )
+        return title_artist_toks, chan_toks
+
+    def _check_artist_match(self, req_title: str, req_artist: str, res_title: str, res_artist: str) -> tuple:
+        """
+        Checks whether res_artist/res_title matches the requested artist (either from YouTube title
+        like 'Cry for me - Michita ft 愛海' or from GSMTC artist).
+        Returns (matched: bool, has_explicit_title_artist: bool, hit_count: int).
+        """
+        title_art_toks, chan_toks = self._extract_expected_artist_tokens(req_title, req_artist, res_title)
+        res_meta_f = self._fold_latin(f"{res_title or ''} {res_artist or ''}")
+        res_meta_raw = f"{res_title or ''} {res_artist or ''}".lower()
+
+        title_hits = sum(1 for tok in title_art_toks if (tok in res_meta_f or tok in res_meta_raw))
+        chan_hits = sum(1 for tok in chan_toks if (tok in res_meta_f or tok in res_meta_raw))
+        has_title_artist = bool(title_art_toks)
+        matched = (title_hits > 0) or (chan_hits > 0)
+        return matched, has_title_artist, title_hits + chan_hits
 
     _CHANNEL_NOISE_RE = re.compile(
         r'(?i)\b(official|vevo|topic|music|channel|entertainment|records|tv|media|'
@@ -727,15 +777,13 @@ class LyricsProvider:
         elif has_real_sync:
             score += 300.0
 
-        # Check artist / featured artist match against BOTH req_artist and raw req_title (e.g. "Michita ft 愛海")
-        res_meta = f"{res_title} {res_artist}".lower()
-        req_meta_tokens = set(re.findall(r'[a-z0-9]{3,}|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]{2,}',
-                                         f"{req_title} {req_artist}".lower()))
-        stop_meta = {'official', 'music', 'video', 'lyric', 'lyrics', 'vietsub', 'engsub', 'feat', 'topic'}
-        req_meta_tokens -= stop_meta
-        if req_meta_tokens:
-            hits = sum(1 for tok in req_meta_tokens if tok in res_meta)
-            score += min(220.0, hits * 55.0)
+        # Strong artist / featured artist verification against BOTH req_artist and raw req_title (e.g. "Michita ft 愛海")
+        artist_matched, has_title_artist, art_hits = self._check_artist_match(req_title, req_artist, res_title, res_artist)
+        if artist_matched:
+            score += 550.0 + min(220.0, art_hits * 70.0)
+        elif has_title_artist:
+            # Title explicitly named a specific artist (e.g. 'Michita ft 愛海') that DOES NOT match res_artist (e.g. 'Violet Skies')!
+            score -= 480.0
 
         # Version tag alignment (Solo Version, Acoustic, Live, Lofi, Remix, Demo...)
         score += self._version_match_score(req_title, res_title)
@@ -843,13 +891,20 @@ class LyricsProvider:
                         or (cached_src_dur <= 0.0 and cached_lines and (duration - float(cached_lines[-1]["time"])) > 28.0)
                     )
                 )
+                cached_art_ok = True
+                if not is_manual:
+                    c_matched, c_has_title_art, _ = self._check_artist_match(
+                        title, clean_a, cached_data.get("title", ""), cached_data.get("artist", "")
+                    )
+                    if c_has_title_art and not c_matched:
+                        cached_art_ok = False
                 cached_title_ok = is_manual or self.is_valid_match(title, cached_data.get("title", ""), req_artist=clean_a)
-                cached_script_ok = is_manual or self._is_lyric_script_compatible(title, cached_lines)
+                cached_script_ok = is_manual or self._is_lyric_script_compatible(title, cached_lines, artist_matched=cached_art_ok)
                 req_is_remix = bool(re.search(r'(?i)\b(remix|bootleg|cover|live|lofi|slowed)\b', title or ""))
                 cached_unwanted_remix = (not is_manual) and (not req_is_remix) and bool(
                     re.search(r'(?i)\b(remix|bootleg|cover|lofi|slowed)\b', str(cached_data.get("title") or ""))
                 )
-                if cached_title_ok and cached_script_ok and (not cached_unwanted_remix) and (not legacy_mv_mismatch) and (is_manual or (cached_data.get("has_real_timestamps", False) and not dur_changed)):
+                if cached_title_ok and cached_art_ok and cached_script_ok and (not cached_unwanted_remix) and (not legacy_mv_mismatch) and (is_manual or (cached_data.get("has_real_timestamps", False) and not dur_changed)):
                     # If cached entry has no user-saved offset yet, still check intro-trim alignment
                     if "sync_offset" not in cached_data and duration > 30.0:
                         self._apply_auto_intro_offset(cached_data, duration)
@@ -870,33 +925,54 @@ class LyricsProvider:
             return abs(sd - duration) if sd > 30.0 else 9999.0
 
         def _search_best_lrclib():
-            """Checks LRCLIB candidates and picks the closest-duration high-quality synced LRC (crucial for Official MVs!)."""
+            """
+            Checks LRCLIB candidates and picks the best synced LRC:
+            1) STRICTLY prefers artist-matched tracks (so 'Cry for me - Michita ft 愛海' NEVER gets
+               overwritten by unrelated 'Cry for Me - Violet Skies' even if durations differ!).
+            2) Among tracks with equal artist-match tier (e.g. MV vs Studio of the same song),
+               picks the closest-duration high-quality synced LRC!
+            """
             nonlocal plain_fallback
             best_lrc = None
+            best_lrc_art = False
             best_lrc_diff = 9999.0
+            best_lrc_score = -1e9
+
+            def _consider(res_item):
+                nonlocal best_lrc, best_lrc_art, best_lrc_diff, best_lrc_score
+                if not res_item:
+                    return
+                r_art = bool(res_item.get("_artist_matched", False))
+                r_diff = _dur_diff(res_item)
+                r_sc = float(res_item.get("_score", 0.0))
+                if best_lrc is None:
+                    best_lrc, best_lrc_art, best_lrc_diff, best_lrc_score = res_item, r_art, r_diff, r_sc
+                    return
+                # NEVER let an unmatched-artist track replace an artist-matched track!
+                if best_lrc_art and not r_art:
+                    return
+                if r_art and not best_lrc_art:
+                    best_lrc, best_lrc_art, best_lrc_diff, best_lrc_score = res_item, r_art, r_diff, r_sc
+                    return
+                # Same artist-match tier -> prefer significantly closer duration, then higher quality score
+                if r_diff + 2.0 < best_lrc_diff or (abs(r_diff - best_lrc_diff) <= 2.0 and r_sc > best_lrc_score):
+                    best_lrc, best_lrc_art, best_lrc_diff, best_lrc_score = res_item, r_art, r_diff, r_sc
 
             ex, pf = self._fetch_lrclib_exact(exact_title_query, norm_a or clean_a, duration=duration, require_synced=True, req_title=title)
             if pf and not plain_fallback:
                 plain_fallback = pf
-            if ex:
-                d_ex = _dur_diff(ex)
-                best_lrc = ex
-                best_lrc_diff = d_ex
-                if duration <= 30.0 or d_ex <= 6.0:
-                    return best_lrc
+            _consider(ex)
+            if best_lrc and best_lrc_art and (duration <= 30.0 or best_lrc_diff <= 6.0):
+                return best_lrc
 
             for cand in candidates:
                 res, pf = self._fetch_lrclib_search(cand, req_title=title, req_artist=clean_a, duration=duration, require_synced=True)
                 if pf and not plain_fallback:
                     plain_fallback = pf
-                if res:
-                    d_res = _dur_diff(res)
-                    if best_lrc is None or d_res + 2.0 < best_lrc_diff:
-                        best_lrc = res
-                        best_lrc_diff = d_res
-                    # Stop immediately once we hit an exact-duration match (within 6s of YouTube video length!)
-                    if duration <= 30.0 or best_lrc_diff <= 6.0:
-                        break
+                _consider(res)
+                # Stop early once we have an artist-matched result with exact video duration!
+                if best_lrc and best_lrc_art and (duration <= 30.0 or best_lrc_diff <= 6.0):
+                    break
             return best_lrc
 
         if is_intl:
@@ -963,6 +1039,8 @@ class LyricsProvider:
             data = plain_fallback
 
         if data:
+            data.pop("_artist_matched", None)
+            data.pop("_score", None)
             if duration > 30.0:
                 data["track_duration"] = round(float(duration), 1)
                 data["_best_dur_checked"] = True
@@ -1086,18 +1164,23 @@ class LyricsProvider:
                 res_dur = float(res.get("duration") or 0.0)
                 dur_val = duration if (duration and duration > 30.0) else (res_dur or 210.0)
                 check_t = req_title or title
+                res_t = res.get("trackName", title)
+                res_a = res.get("artistName", artist)
+                ex_art_ok, _, _ = self._check_artist_match(check_t, artist, res_t, res_a)
                 if synced:
                     parsed = self.parse_lrc(synced, duration=dur_val)
-                    if parsed and self._is_lyric_script_compatible(check_t, parsed):
+                    if parsed and self._is_lyric_script_compatible(check_t, parsed, artist_matched=ex_art_ok):
                         synced_dict = {
-                            "title": res.get("trackName", title),
-                            "artist": res.get("artistName", artist),
+                            "title": res_t,
+                            "artist": res_a,
                             "synced": True,
                             "has_real_timestamps": True,
                             "source_duration": round(float(res_dur), 1) if res_dur > 0 else 0.0,
                             "lines": parsed,
                             "raw_lrc": synced,
-                            "source": "LRCLIB Exact"
+                            "source": "LRCLIB Exact",
+                            "_artist_matched": ex_art_ok,
+                            "_score": self._score_lyric_lines(parsed, True, res_dur, duration, check_t, artist, res_t, res_a),
                         }
                         # If duration differs significantly (e.g. 3:35 Audio vs 4:08 Official MV),
                         # keep as fallback so ranked LRCLIB Search can find the exact-duration MV sync!
@@ -1106,15 +1189,16 @@ class LyricsProvider:
                         return synced_dict, None
                 if plain:
                     parsed = self.parse_lrc(plain, duration=dur_val)
-                    if parsed and self._is_lyric_script_compatible(check_t, parsed):
+                    if parsed and self._is_lyric_script_compatible(check_t, parsed, artist_matched=ex_art_ok):
                         plain_dict = {
-                            "title": res.get("trackName", title),
-                            "artist": res.get("artistName", artist),
+                            "title": res_t,
+                            "artist": res_a,
                             "synced": True,
                             "has_real_timestamps": False,
                             "plain": plain,
                             "lines": parsed,
-                            "source": "LRCLIB Exact (Plain)"
+                            "source": "LRCLIB Exact (Plain)",
+                            "_artist_matched": ex_art_ok,
                         }
                         return (None if require_synced else plain_dict), plain_dict
         except Exception as e:
@@ -1144,10 +1228,12 @@ class LyricsProvider:
 
                         dur_for_parse = duration if (duration and duration > 30.0) else (item_dur or 210.0)
 
+                        art_ok, _, _ = self._check_artist_match(req_title, req_artist, res_t, res_a)
+
                         synced = item.get("syncedLyrics")
                         if synced:
                             parsed = self.parse_lrc(synced, duration=dur_for_parse)
-                            if parsed and self._is_lyric_script_compatible(req_title, parsed):
+                            if parsed and self._is_lyric_script_compatible(req_title, parsed, artist_matched=art_ok):
                                 sc = self._score_lyric_lines(
                                     parsed, True, item_dur, duration,
                                     req_title, req_artist, res_t, res_a
@@ -1162,14 +1248,16 @@ class LyricsProvider:
                                         "source_duration": round(float(item_dur), 1) if item_dur and item_dur > 0 else 0.0,
                                         "lines": parsed,
                                         "raw_lrc": synced,
-                                        "source": "LRCLIB Search"
+                                        "source": "LRCLIB Search",
+                                        "_artist_matched": art_ok,
+                                        "_score": sc,
                                     }
                                 continue
 
                         plain = item.get("plainLyrics")
                         if plain:
                             parsed = self.parse_lrc(plain, duration=dur_for_parse)
-                            if parsed and self._is_lyric_script_compatible(req_title, parsed):
+                            if parsed and self._is_lyric_script_compatible(req_title, parsed, artist_matched=art_ok):
                                 sc = self._score_lyric_lines(
                                     parsed, False, item_dur, duration,
                                     req_title, req_artist, res_t, res_a
@@ -1183,7 +1271,9 @@ class LyricsProvider:
                                         "has_real_timestamps": False,
                                         "plain": plain,
                                         "lines": parsed,
-                                        "source": "LRCLIB Search (Plain)"
+                                        "source": "LRCLIB Search (Plain)",
+                                        "_artist_matched": art_ok,
+                                        "_score": sc,
                                     }
         except Exception as e:
             print(f"[LRCLIB Search Error] {e}")

@@ -10,6 +10,7 @@ from modules.qt_compat import (
     QProgressBar, QFrame, Qt, QThread, Signal
 )
 from modules.icon_factory import IconFactory
+from modules.i18n import tr
 
 GITHUB_REPO = "quanganh296/MyLyricForMusic"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -207,9 +208,10 @@ class MandatoryUpdateDialog(QDialog):
     Does not offer a Skip/Later option — users must update to continue using LyricNow.
     """
 
-    def __init__(self, current_version: str, release_info: dict, parent=None):
+    def __init__(self, current_version: str, release_info: dict, app_lang: str = "vi", parent=None):
         super().__init__(parent)
         self.current_version = current_version
+        self.app_lang = app_lang or "vi"
         self.release_info = release_info or {}
         self.latest_version = self.release_info.get("version", "")
         self.release_url = self.release_info.get("release_url") or GITHUB_WEB_LATEST
@@ -218,7 +220,7 @@ class MandatoryUpdateDialog(QDialog):
         self.download_worker = None
         self.update_applied = False
 
-        self.setWindowTitle(f"Cập nhật bắt buộc - LyricNow {self.latest_version}")
+        self.setWindowTitle(tr(self.app_lang, "upd_win_title", ver=self.latest_version))
         self.setWindowFlags(
             Qt.WindowType.Dialog
             | Qt.WindowType.WindowStaysOnTopHint
@@ -349,11 +351,9 @@ class MandatoryUpdateDialog(QDialog):
 
         text_col = QVBoxLayout()
         text_col.setSpacing(3)
-        lbl_title = QLabel("Đã có bản cập nhật mới bắt buộc!")
+        lbl_title = QLabel(tr(self.app_lang, "upd_heading"))
         lbl_title.setObjectName("TitleLabel")
-        lbl_sub = QLabel(
-            "Phiên bản cũ không thể tiếp tục sử dụng. Vui lòng cập nhật lên bản mới nhất để dùng tiếp LyricNow."
-        )
+        lbl_sub = QLabel(tr(self.app_lang, "upd_sub"))
         lbl_sub.setObjectName("SubLabel")
         lbl_sub.setWordWrap(True)
         text_col.addWidget(lbl_title)
@@ -364,11 +364,11 @@ class MandatoryUpdateDialog(QDialog):
         # Version comparison row
         ver_row = QHBoxLayout()
         ver_row.setSpacing(10)
-        lbl_old = QLabel(f"Bản hiện tại: {self.current_version}")
+        lbl_old = QLabel(tr(self.app_lang, "upd_cur_ver", ver=self.current_version))
         lbl_old.setObjectName("VerBadgeOld")
         lbl_arrow = QLabel("->")
         lbl_arrow.setStyleSheet("color: #94a3b8; font-weight: bold; font-size: 13px;")
-        lbl_new = QLabel(f"Bản mới nhất: {self.latest_version}")
+        lbl_new = QLabel(tr(self.app_lang, "upd_new_ver", ver=self.latest_version))
         lbl_new.setObjectName("VerBadgeNew")
         ver_row.addWidget(lbl_old)
         ver_row.addWidget(lbl_arrow)
@@ -377,16 +377,13 @@ class MandatoryUpdateDialog(QDialog):
         layout.addLayout(ver_row)
 
         # Release notes box
-        lbl_notes_hdr = QLabel("Nội dung cập nhật mới:")
+        lbl_notes_hdr = QLabel(tr(self.app_lang, "upd_notes_hdr"))
         lbl_notes_hdr.setStyleSheet("font-size: 12px; font-weight: bold; color: #cbd5e1;")
         layout.addWidget(lbl_notes_hdr)
 
         self.txt_notes = QTextEdit()
         self.txt_notes.setReadOnly(True)
-        default_notes = (
-            f"Phiên bản {self.latest_version} đã sẵn sàng trên GitHub Releases.\n"
-            "Nhấn nút Cập nhật ngay bên dưới để tải và cài đặt phiên bản mới nhất."
-        )
+        default_notes = f"LyricNow {self.latest_version} — GitHub Releases."
         self.txt_notes.setPlainText(self.notes if self.notes else default_notes)
         layout.addWidget(self.txt_notes, stretch=1)
 
@@ -407,19 +404,19 @@ class MandatoryUpdateDialog(QDialog):
         btn_row.setSpacing(8)
 
         can_auto = bool(getattr(sys, "frozen", False) and self.download_url)
-        self.btn_update = QPushButton(" Tải & Cập nhật ngay" if can_auto else " Tải bản cập nhật mới")
+        self.btn_update = QPushButton(tr(self.app_lang, "upd_btn_auto" if can_auto else "upd_btn_web"))
         self.btn_update.setObjectName("PrimaryUpdateBtn")
         self.btn_update.setIcon(IconFactory.create_icon("download", "#09090b", 14))
         self.btn_update.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_update.clicked.connect(self._on_update_clicked)
 
-        self.btn_open_web = QPushButton(" Mở GitHub")
+        self.btn_open_web = QPushButton(tr(self.app_lang, "upd_btn_github"))
         self.btn_open_web.setObjectName("SecondaryBtn")
         self.btn_open_web.setIcon(IconFactory.create_icon("external_link", "#f1f5f9", 12))
         self.btn_open_web.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_open_web.clicked.connect(self._open_release_page)
 
-        self.btn_exit = QPushButton(" Thoát")
+        self.btn_exit = QPushButton(tr(self.app_lang, "upd_btn_exit"))
         self.btn_exit.setObjectName("ExitBtn")
         self.btn_exit.setIcon(IconFactory.create_icon("close", "#fca5a5", 12))
         self.btn_exit.setCursor(Qt.CursorShape.PointingHandCursor)

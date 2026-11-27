@@ -14,6 +14,7 @@ from modules.theme_extractor import ThemeExtractor
 from modules.video_player import RoundedVideoDisplay
 from modules.lyrics_translator import TranslationWorker, has_non_latin_script
 from modules.version import APP_VERSION
+from modules.i18n import tr
 from modules.karaoke_widgets import ModeDropdownButton, KaraokeLyricWidget, SplitTransitionStage, SongTitleOverlay
 
 
@@ -640,6 +641,7 @@ class LyricOverlayWindow(QWidget):
         # Right Video Pane (Mode 1 & Mode 3 Karaoke when Video is ON)
         self.video_display = RoundedVideoDisplay(self.container)
         self.video_display.clicked.connect(lambda: self.media_listener.send_control("play_pause") if self.media_listener else None)
+        self.video_display.video_id_resolved.connect(self._on_video_id_resolved)
         self.video_display.artwork_ready.connect(self._on_hd_artwork_ready)
         self.video_display.video_frame_artwork_ready.connect(self._on_video_frame_artwork_ready)
 
@@ -869,11 +871,12 @@ class LyricOverlayWindow(QWidget):
         if not hasattr(self, "btn_karaoke_video"):
             return
         on = bool(self.karaoke_show_video)
+        lang = self._lang()
         self.btn_karaoke_video.setObjectName("KaraokeVideoBtnActive" if on else "KaraokeVideoBtn")
         self.btn_karaoke_video.setIcon(IconFactory.create_icon("film", "#09090b" if on else "#f1f5f9", 12))
+        self.btn_karaoke_video.setText(tr(lang, "btn_video"))
         self.btn_karaoke_video.setToolTip(
-            "Video đang BẬT — Nhấn để tắt Video và đưa lời Karaoke vào chính giữa"
-            if on else "Video đang TẮT — Nhấn để hiện lại Video bên phải"
+            tr(lang, "tip_karaoke_video_on" if on else "tip_karaoke_video_off")
         )
         self.btn_karaoke_video.style().unpolish(self.btn_karaoke_video)
         self.btn_karaoke_video.style().polish(self.btn_karaoke_video)
@@ -1167,6 +1170,7 @@ class LyricOverlayWindow(QWidget):
 
         req_token = str(self._track_gen)
         if self.current_media_state and self.current_media_state.title:
+            track_dur = float(getattr(self.current_media_state, "duration", 0.0) or 0.0)
             self._current_video_req_key = self.video_display.load_track(
                 title=self.current_media_state.title,
                 artist=self.current_media_state.artist,
@@ -1176,6 +1180,7 @@ class LyricOverlayWindow(QWidget):
                 is_playing=self.current_media_state.is_playing,
                 req_token=req_token,
                 artwork_only=artwork_only,
+                duration=track_dur,
             )
         elif self.current_lyrics and self.current_lyrics.get("title"):
             self._current_video_req_key = self.video_display.load_track(
@@ -1191,6 +1196,15 @@ class LyricOverlayWindow(QWidget):
 
     def _trigger_mode1_media_load(self):
         self._trigger_track_media_load()
+
+    def _on_video_id_resolved(self, req_key: str, vid: str):
+        """Locks the resolved YouTube video_id for the current song so Karaoke Video toggle NEVER switches videos."""
+        if not vid:
+            return
+        if req_key and self._current_video_req_key and req_key != self._current_video_req_key:
+            return
+        if not self.current_video_id:
+            self.current_video_id = vid
 
     def _on_hd_artwork_ready(self, req_key: str, img_bytes: bytes):
         if not img_bytes:
@@ -1318,6 +1332,58 @@ class LyricOverlayWindow(QWidget):
         else:
             self.btn_vol.setIcon(IconFactory.create_icon("volume", "#ffffff"))
 
+    def _lang(self) -> str:
+        return (self.settings.get("app_lang") or "vi") if isinstance(self.settings, dict) else "vi"
+
+    def _apply_ui_language(self, lang: str):
+        """Applies the selected App UI Language live to all buttons, tooltips, dropdowns & idle text."""
+        lang = lang or "vi"
+        self.setWindowTitle(tr(lang, "app_title", ver=APP_VERSION))
+        if hasattr(self, "btn_mode_dropdown"):
+            self.btn_mode_dropdown.set_language(lang)
+        if hasattr(self, "video_display"):
+            self.video_display.set_language(lang)
+        if hasattr(self, "btn_karaoke_video"):
+            self.btn_karaoke_video.setText(tr(lang, "btn_video"))
+            self.btn_karaoke_video.setToolTip(
+                tr(lang, "tip_karaoke_video_on" if self.karaoke_show_video else "tip_karaoke_video_off")
+            )
+        if hasattr(self, "btn_prev"):
+            self.btn_prev.setText(tr(lang, "prev_line"))
+            self.btn_prev.setToolTip(tr(lang, "tip_prev"))
+        if hasattr(self, "btn_play"):
+            self.btn_play.setText(tr(lang, "play_pause"))
+            self.btn_play.setToolTip(tr(lang, "tip_play"))
+        if hasattr(self, "btn_next"):
+            self.btn_next.setText(tr(lang, "next_line"))
+            self.btn_next.setToolTip(tr(lang, "tip_next"))
+        if hasattr(self, "btn_zoom_out"):
+            self.btn_zoom_out.setToolTip(tr(lang, "tip_zoom_out"))
+            self.btn_zoom_in.setToolTip(tr(lang, "tip_zoom_in"))
+        if hasattr(self, "btn_search"):
+            self.btn_search.setToolTip(tr(lang, "tip_search"))
+            self.btn_settings.setToolTip(tr(lang, "tip_settings"))
+            self.btn_lock.setToolTip(tr(lang, "tip_locked" if self.is_locked else "tip_lock"))
+            self.btn_minimize.setToolTip(tr(lang, "tip_minimize"))
+            self.btn_fullscreen.setToolTip(tr(lang, "tip_exit_fullscreen" if self.is_fullscreen else "tip_fullscreen"))
+            self.btn_compact.setToolTip(tr(lang, "tip_compact"))
+            self.btn_close.setToolTip(tr(lang, "tip_close"))
+        if hasattr(self, "btn_translate"):
+            trans_enabled = bool(self.settings.get("enable_translation", True))
+            self.btn_translate.setToolTip(
+                tr(lang, "tip_trans_on", lang=self.settings.get("translate_lang", "vi"))
+                if trans_enabled else tr(lang, "tip_trans_off")
+            )
+        # Update idle placeholders if no track is playing yet
+        if not self.current_media_state and not self.current_lyrics:
+            if hasattr(self, "lbl_song_info"):
+                self.lbl_song_info.setText(tr(lang, "waiting_music"))
+            if hasattr(self, "lbl_active"):
+                self.lbl_active.setText(tr(lang, "waiting_sources"))
+            if hasattr(self, "karaoke_widget"):
+                self.karaoke_widget.set_static_text(tr(lang, "waiting_sources"))
+        QTimer.singleShot(0, self._position_karaoke_video_btn)
+
     # ---------------------------------------------------------
     # Styling & Settings
     # ---------------------------------------------------------
@@ -1327,6 +1393,8 @@ class LyricOverlayWindow(QWidget):
         if new_mode in (1, 2, 3) and new_mode != self.display_mode:
             self.display_mode = new_mode
             self._apply_mode_layout(resize_window=True)
+
+        self._apply_ui_language(self._lang())
 
         font_family = settings.get("font_family", "Segoe UI")
         font_size = int(settings.get("font_size", 22))
@@ -1434,8 +1502,8 @@ class LyricOverlayWindow(QWidget):
             hover_color="#7dd3fc" if trans_enabled else "#ffffff"
         )
         self.btn_translate.setToolTip(
-            f"Tự động dịch & phiên âm đang BẬT ({self.settings.get('translate_lang', 'vi')}) — Nhấn để tắt"
-            if trans_enabled else "Tự động dịch & phiên âm đang TẮT — Nhấn để bật"
+            tr(self._lang(), "tip_trans_on", lang=self.settings.get("translate_lang", "vi"))
+            if trans_enabled else tr(self._lang(), "tip_trans_off")
         )
 
         qss = f"""
@@ -1858,10 +1926,11 @@ class LyricOverlayWindow(QWidget):
     def on_media_updated(self, media_state):
         self.current_media_state = media_state
         if not media_state or not media_state.title:
-            self.lbl_song_info.setText("Đang chờ phát nhạc...")
-            self.lbl_active.setText("Chưa phát bài hát nào trên hệ thống Windows...")
+            lang = self._lang()
+            self.lbl_song_info.setText(tr(lang, "waiting_music"))
+            self.lbl_active.setText(tr(lang, "no_track_playing"))
             if hasattr(self, "karaoke_widget"):
-                self.karaoke_widget.set_static_text("Chưa phát bài hát nào trên hệ thống Windows...")
+                self.karaoke_widget.set_static_text(tr(lang, "no_track_playing"))
             self.lbl_active_romaji.setText("")
             self.lbl_active_romaji.setVisible(False)
             self.lbl_active_trans.setText("")
@@ -1928,7 +1997,7 @@ class LyricOverlayWindow(QWidget):
                     "req_title": new_title,
                     "req_artist": new_artist,
                     "synced": False,
-                    "lines": [{"time": 0.0, "text": "Không tìm thấy lời bài hát tự động. Nhấn nút kính lúp để tìm thủ công."}]
+                    "lines": [{"time": 0.0, "text": tr(self._lang(), "no_lyrics_found")}]
                 }
 
             # If cached lyrics carried an explicit YouTube video_id, align artwork/video to that exact video
@@ -2063,14 +2132,15 @@ class LyricOverlayWindow(QWidget):
             return
         lines = self.current_lyrics["lines"]
         idx = self.current_line_index
+        intro_txt = tr(self._lang(), "intro_music")
         if idx < 0:
             self.lbl_prev2.setText("")
             self.lbl_prev.setText("")
             is_intro = bool(lines and lines[0]["time"] > 2.0 and self.current_media_state)
-            self.lbl_active.setText("... (Nhạc dạo đầu) ..." if is_intro else lines[0]["text"])
+            self.lbl_active.setText(intro_txt if is_intro else lines[0]["text"])
             if hasattr(self, "karaoke_widget"):
                 if is_intro:
-                    self.karaoke_widget.set_lyric_line([], -1, "... (Nhạc dạo đầu) ...")
+                    self.karaoke_widget.set_lyric_line([], -1, intro_txt)
                 else:
                     self.karaoke_widget.set_lyric_line(lines, 0)
             self._update_active_translation_label(-1 if is_intro else 0)
@@ -2078,7 +2148,7 @@ class LyricOverlayWindow(QWidget):
             self.lbl_next2.setText(lines[1]["text"] if (is_intro and len(lines) > 1) else (lines[2]["text"] if len(lines) > 2 else ""))
         else:
             self.lbl_prev2.setText(lines[idx - 2]["text"] if idx >= 2 else "")
-            self.lbl_prev.setText(lines[idx - 1]["text"] if idx > 0 else "... (Nhạc dạo đầu) ...")
+            self.lbl_prev.setText(lines[idx - 1]["text"] if idx > 0 else intro_txt)
             self.lbl_active.setText(lines[idx]["text"] if idx < len(lines) else "")
             if hasattr(self, "karaoke_widget"):
                 self.karaoke_widget.set_lyric_line(lines, idx)
@@ -2126,16 +2196,17 @@ class LyricOverlayWindow(QWidget):
 
         if active_idx != self.current_line_index:
             self.current_line_index = active_idx
+            intro_txt = tr(self._lang(), "intro_music")
 
             if active_idx == -1:
                 prev2_text = ""
                 prev_text = ""
-                active_text = "... (Nhạc dạo đầu) ..."
+                active_text = intro_txt
                 next_text = lines[0]["text"] if lines else ""
                 next2_text = lines[1]["text"] if len(lines) > 1 else ""
             else:
                 prev2_text = lines[active_idx - 2]["text"] if active_idx >= 2 else ""
-                prev_text = lines[active_idx - 1]["text"] if active_idx > 0 else "... (Nhạc dạo đầu) ..."
+                prev_text = lines[active_idx - 1]["text"] if active_idx > 0 else intro_txt
                 active_text = lines[active_idx]["text"]
                 next_text = lines[active_idx + 1]["text"] if active_idx + 1 < len(lines) else ""
                 next2_text = lines[active_idx + 2]["text"] if active_idx + 2 < len(lines) else ""
@@ -2145,7 +2216,7 @@ class LyricOverlayWindow(QWidget):
             self.lbl_active.setText(active_text)
             if hasattr(self, "karaoke_widget"):
                 if active_idx == -1:
-                    self.karaoke_widget.set_lyric_line([], -1, "... (Nhạc dạo đầu) ...")
+                    self.karaoke_widget.set_lyric_line([], -1, intro_txt)
                 else:
                     self.karaoke_widget.set_lyric_line(lines, active_idx)
             self._update_active_translation_label(active_idx)

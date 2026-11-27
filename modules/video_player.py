@@ -1,3 +1,4 @@
+import json
 import re
 import urllib.parse
 import requests
@@ -6,15 +7,37 @@ from modules.qt_compat import (
     QPixmap, QImage, QUrl, QRectF, QFont,
     QMediaPlayer, QAudioOutput, QVideoSink, MULTIMEDIA_AVAILABLE
 )
+from modules.i18n import tr
+
+
+def _parse_yt_length_sec(length_str: str) -> float:
+    """Parses YouTube duration strings like '3:36' or '1:04:12' into seconds."""
+    if not length_str:
+        return 0.0
+    parts = [p for p in str(length_str).strip().split(":") if p.isdigit()]
+    if not parts:
+        return 0.0
+    sec = 0
+    for p in parts:
+        sec = sec * 60 + int(p)
+    return float(sec)
+
+
+def _norm_match_tokens(text: str) -> set:
+    if not text:
+        return set()
+    return set(re.findall(r'[a-z0-9\u00c0-\u024f\u1e00-\u1eff]{2,}|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+', text.lower()))
 
 
 class VideoStreamResolver(QThread):
-    """Background worker that resolves a YouTube video ID and direct playable MP4 stream URL."""
+    """Background worker that resolves the EXACT YouTube video ID and direct playable MP4 stream URL."""
+    video_id_found = Signal(str, str)        # req_key, video_id (emitted immediately so video ID locks!)
     artwork_fetched = Signal(str, bytes)     # req_key, thumb_bytes (emitted immediately before yt-dlp)
     resolved = Signal(str, str, str, bytes)  # req_key, video_id, stream_url, thumb_bytes
     failed = Signal(str, str)                # req_key, reason
 
-    def __init__(self, req_key: str, title: str, artist: str = "", video_id: str = None, need_audio: bool = False, artwork_only: bool = False):
+    def __init__(self, req_key: str, title: str, artist: str = "", video_id: str = None,
+                 need_audio: bool = False, artwork_only: bool = False, duration: float = 0.0):
         super().__init__()
         self.req_key = req_key
         self.title = title
@@ -22,6 +45,7 @@ class VideoStreamResolver(QThread):
         self.video_id = video_id
         self.need_audio = need_audio
         self.artwork_only = artwork_only
+        self.duration = float(duration or 0.0)
         self._cancelled = False
 
     def cancel(self):
@@ -39,6 +63,78 @@ class VideoStreamResolver(QThread):
             }
             resp = requests.get(url, headers=headers, timeout=6)
             if resp.status_code == 200:
+                # Score real videoRenderer entries by exact title + channel + duration match
+                # so we lock onto the EXACT YouTube video the user is playing instead of a similar lyrics video!
+                m = re.search(r"var ytInitialData = (\{.*?\});</script>", resp.text)
+                if m:
+                    try:
+                        data = json.loads(m.group(1))
+                        renderers = []
+
+                        def _collect(obj):
+                            if len(renderers) >= 12:
+                                return
+                            if isinstance(obj, dict):
+                                if "videoRenderer" in obj and isinstance(obj["videoRenderer"], dict):
+                                    renderers.append(obj["videoRenderer"])
+                                    return
+                                for v in obj.values():
+                                    _collect(v)
+                            elif isinstance(obj, list):
+                                for it in obj:
+                                    _collect(it)
+
+                        _collect(data)
+                        if renderers:
+                            req_t_low = (self.title or "").strip().lower()
+                            req_a_low = (self.artist or "").strip().lower()
+                            req_t_toks = _norm_match_tokens(self.title)
+                            best_vid = None
+                            best_score = -1e9
+
+                            for rank_idx, vr in enumerate(renderers):
+                                vid = vr.get("videoId")
+                                if not vid or len(vid) != 11:
+                                    continue
+                                cand_t = "".join(r.get("text", "") for r in (vr.get("title", {}).get("runs") or [])).strip()
+                                cand_ch = "".join(r.get("text", "") for r in (vr.get("ownerText", {}).get("runs") or [])).strip()
+                                cand_dur = _parse_yt_length_sec(vr.get("lengthText", {}).get("simpleText", ""))
+
+                                sc = max(0.0, 24.0 - rank_idx * 3.0)
+                                cand_t_low = cand_t.lower()
+                                if req_t_low and cand_t_low == req_t_low:
+                                    sc += 500.0
+                                elif req_t_low and (req_t_low in cand_t_low or cand_t_low in req_t_low):
+                                    sc += 280.0
+                                else:
+                                    ct = _norm_match_tokens(cand_t)
+                                    if req_t_toks and ct:
+                                        overlap = len(req_t_toks & ct) / max(1, len(req_t_toks))
+                                        sc += overlap * 240.0
+
+                                if req_a_low and cand_ch:
+                                    ch_low = cand_ch.lower()
+                                    if ch_low == req_a_low or req_a_low in ch_low or ch_low in req_a_low:
+                                        sc += 320.0
+
+                                if self.duration > 20.0 and cand_dur > 20.0:
+                                    diff = abs(cand_dur - self.duration)
+                                    if diff <= 3.0:
+                                        sc += 220.0
+                                    elif diff <= 8.0:
+                                        sc += 120.0
+                                    elif diff > 35.0:
+                                        sc -= 140.0
+
+                                if sc > best_score:
+                                    best_score = sc
+                                    best_vid = vid
+
+                            if best_vid:
+                                return best_vid
+                    except Exception:
+                        pass
+
                 vids = re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', resp.text)
                 if vids:
                     return vids[0]
@@ -64,8 +160,11 @@ class VideoStreamResolver(QThread):
         if self._cancelled:
             return
         if not vid:
-            self.failed.emit(self.req_key, "Không tìm thấy video YouTube phù hợp")
+            self.failed.emit(self.req_key, "No matching YouTube video found")
             return
+
+        # Emit resolved video_id immediately so parent locks onto this exact video across Mode 3 Video toggles!
+        self.video_id_found.emit(self.req_key, vid)
 
         thumb_bytes = self._fetch_thumbnail_bytes(vid)
         if self._cancelled:
@@ -74,7 +173,7 @@ class VideoStreamResolver(QThread):
             # Deliver real HD YouTube thumbnail immediately (~0.3s) without waiting for yt-dlp!
             self.artwork_fetched.emit(self.req_key, thumb_bytes)
 
-        # In Mode 2 (Lyric-only), only fetch the HD video artwork without downloading/decoding MP4 stream!
+        # In Mode 2 (or Mode 3 with Video OFF), only fetch HD artwork without decoding MP4 stream!
         if self.artwork_only:
             return
 
@@ -102,7 +201,7 @@ class VideoStreamResolver(QThread):
             if stream_url:
                 self.resolved.emit(self.req_key, vid, stream_url, thumb_bytes)
             else:
-                self.failed.emit(self.req_key, "Không thể lấy luồng video")
+                self.failed.emit(self.req_key, "Could not resolve video stream")
         except Exception as e:
             print(f"[VideoResolver yt-dlp Error] {e}")
             if not self._cancelled:
@@ -116,14 +215,16 @@ class RoundedVideoDisplay(QWidget):
     inside WA_TranslucentBackground frameless windows.
     """
     clicked = Signal()
+    video_id_resolved = Signal(str, str)            # req_key, locked YouTube video_id
     artwork_ready = Signal(str, bytes)              # req_key, thumb_bytes (HD YouTube thumbnail)
     video_frame_artwork_ready = Signal(str, QImage) # req_key, decoded video frame fallback
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._app_lang = "vi"
         self.setMinimumSize(220, 130)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Nhấn vào video để Phát / Tạm dừng")
+        self.setToolTip(tr(self._app_lang, "video_click_tip"))
 
         self.current_frame_img = QImage()
         self.fallback_pixmap = QPixmap()
@@ -132,6 +233,8 @@ class RoundedVideoDisplay(QWidget):
         self._render_opacity = 1.0
 
         self.current_req_key = None
+        self.current_video_id = None
+        self._cached_streams = {}  # video_id -> direct stream URL (instant resume on Karaoke Video toggle!)
         self.resolver = None
         self._old_resolvers = []
         self.is_stream_loaded = False
@@ -158,6 +261,11 @@ class RoundedVideoDisplay(QWidget):
             self.player.mediaStatusChanged.connect(self._on_media_status_changed)
             self.player.errorOccurred.connect(self._on_player_error)
 
+    def set_language(self, lang: str):
+        self._app_lang = lang or "vi"
+        self.setToolTip(tr(self._app_lang, "video_click_tip"))
+        self.update()
+
     def _cleanup_old_resolver(self, resolver):
         if resolver in self._old_resolvers:
             self._old_resolvers.remove(resolver)
@@ -182,17 +290,30 @@ class RoundedVideoDisplay(QWidget):
 
     def load_track(self, title: str, artist: str = "", thumb_bytes: bytes = None,
                    video_id: str = None, position_sec: float = 0.0, is_playing: bool = False,
-                   req_token: str = "", artwork_only: bool = False):
-        req_key = f"{req_token}|{video_id or ''}|{title}|{artist}"
-        same_track = (req_key == self.current_req_key)
+                   req_token: str = "", artwork_only: bool = False, duration: float = 0.0):
+        # Preserve locked video_id for the exact same playing track so toggling Video in Karaoke Mode
+        # NEVER re-searches YouTube or jumps to a different video!
+        effective_vid = video_id or (
+            self.current_video_id if (self.current_req_key and self.current_req_key.startswith(f"{req_token}|")) else None
+        )
+        req_key = f"{req_token}|{effective_vid or ''}|{title}|{artist}"
+        same_track = bool(
+            self.current_req_key
+            and (
+                req_key == self.current_req_key
+                or (req_token and self.current_req_key.startswith(f"{req_token}|") and (not effective_vid or effective_vid == self.current_video_id))
+            )
+        )
         if same_track:
             if artwork_only and (self._has_hd_artwork or self.is_stream_loaded or (self.resolver and self.resolver.isRunning())):
-                return req_key
+                return self.current_req_key
             if not artwork_only and (self.is_stream_loaded or (self.resolver and self.resolver.isRunning() and not self._artwork_only_mode)):
-                return req_key
+                return self.current_req_key
 
         self.stop_video(clear_artwork=(not same_track))
         self.current_req_key = req_key
+        if effective_vid:
+            self.current_video_id = effective_vid
         self._artwork_only_mode = artwork_only
         self.pending_seek_sec = max(0.0, position_sec)
         self.pending_playing = is_playing
@@ -210,17 +331,34 @@ class RoundedVideoDisplay(QWidget):
             self.update()
             return req_key
 
-        self.status_text = "" if artwork_only else "Đang tải video..."
+        # Instant resume from cached stream URL if this exact video was already resolved!
+        if (not artwork_only) and effective_vid and effective_vid in self._cached_streams and self.player:
+            cached_url = self._cached_streams[effective_vid]
+            self.status_text = tr(self._app_lang, "video_buffering")
+            self.player.setSource(QUrl(cached_url))
+            self.player.play()
+            self.update()
+            return req_key
+
+        self.status_text = "" if artwork_only else tr(self._app_lang, "video_loading")
         self.update()
 
         self.resolver = VideoStreamResolver(
-            req_key, title, artist, video_id=video_id, need_audio=False, artwork_only=artwork_only
+            req_key, title, artist, video_id=effective_vid,
+            need_audio=False, artwork_only=artwork_only, duration=duration
         )
+        self.resolver.video_id_found.connect(self._on_video_id_found)
         self.resolver.artwork_fetched.connect(self._on_artwork_fetched)
         self.resolver.resolved.connect(self._on_stream_resolved)
         self.resolver.failed.connect(self._on_stream_failed)
         self.resolver.start()
         return req_key
+
+    def _on_video_id_found(self, req_key: str, vid: str):
+        if req_key != self.current_req_key or not vid:
+            return
+        self.current_video_id = vid
+        self.video_id_resolved.emit(req_key, vid)
 
     def _on_artwork_fetched(self, req_key: str, thumb_bytes: bytes):
         if req_key != self.current_req_key or not thumb_bytes:
@@ -232,13 +370,19 @@ class RoundedVideoDisplay(QWidget):
     def _on_stream_resolved(self, req_key: str, video_id: str, stream_url: str, thumb_bytes: bytes):
         if req_key != self.current_req_key:
             return
+        if video_id:
+            self.current_video_id = video_id
+            if stream_url:
+                self._cached_streams[video_id] = stream_url
+                if len(self._cached_streams) > 12:
+                    self._cached_streams.pop(next(iter(self._cached_streams)))
         if thumb_bytes and not self._has_hd_artwork:
             self._has_hd_artwork = True
             self.set_fallback_artwork(thumb_bytes)
             self.artwork_ready.emit(req_key, thumb_bytes)
 
         if self.player and stream_url:
-            self.status_text = "Đang đệm video..."
+            self.status_text = tr(self._app_lang, "video_buffering")
             self.player.setSource(QUrl(stream_url))
             if self.pending_playing:
                 self.player.play()
@@ -351,9 +495,10 @@ class RoundedVideoDisplay(QWidget):
         self._frame_check_count = 0
         self.current_frame_img = QImage()
         self.status_text = ""
-        self.current_req_key = None
         if clear_artwork:
             self.fallback_pixmap = QPixmap()
+            self.current_video_id = None
+            self.current_req_key = None
         self.update()
 
     def mousePressEvent(self, event):
@@ -434,7 +579,7 @@ class RoundedVideoDisplay(QWidget):
             painter.setPen(QColor(255, 255, 255, 130))
             font = QFont("Segoe UI", 10)
             painter.setFont(font)
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Chờ video phát nhạc...")
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, tr(self._app_lang, "video_waiting"))
 
         # Optional subtle status pill in bottom-right corner while buffering
         if self.status_text:

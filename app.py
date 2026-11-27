@@ -46,6 +46,7 @@ DEFAULT_SETTINGS = {
     "bg_opacity": 0.75,
     "display_mode": 1,   # 1: Video + Lyrics, 2: Lyric-Only Centered, 3: Karaoke (word-by-word + video toggle)
     "karaoke_show_video": True,
+    "app_lang": "vi",
     "enable_translation": True,
     "enable_romanization": True,
     "translate_lang": "vi",
@@ -165,7 +166,7 @@ class LyricOverlayApp:
         except Exception:
             pass
 
-        dlg = MandatoryUpdateDialog(APP_VERSION, release_info)
+        dlg = MandatoryUpdateDialog(APP_VERSION, release_info, app_lang=self.settings.get("app_lang", "vi"))
         dlg.exec()
         # Regardless of whether auto-update started or user closed dialog, exit old version!
         self.exit_app()

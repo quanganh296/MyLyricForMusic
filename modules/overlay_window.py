@@ -6,7 +6,7 @@ from modules.qt_compat import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGraphicsDropShadowEffect, QFrame, Qt, QPoint, QTimer, Signal,
     QColor, QFont, QFontMetrics, QCursor, QSizeGrip, QSlider, QIcon,
-    QPainter, QPainterPath, QPixmap, QRectF, QRect, QSizePolicy
+    QPainter, QPainterPath, QPen, QPixmap, QRectF, QRect, QSize, QSizePolicy
 )
 from modules.icon_factory import IconFactory
 from modules.volume_manager import VolumeManager
@@ -204,6 +204,166 @@ class RoundVolumeSlider(QSlider):
         painter.end()
 
 
+class WindowCaptionButton(QPushButton):
+    """
+    Minimal Windows 11 style window caption button ('minimize', 'maximize', 'restore', 'close').
+    Transparent at rest with clean thin-stroke vector icon; highlights smoothly on hover
+    (solid red #e81123 with pure white X for 'close').
+    """
+
+    def __init__(self, kind: str, parent=None):
+        super().__init__(parent)
+        self._kind = kind
+        self._hovered = False
+        self._pressed = False
+        self.setFixedSize(34, 26)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.setFlat(True)
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def set_kind(self, kind: str):
+        if self._kind != kind:
+            self._kind = kind
+            self.update()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._pressed = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._pressed = True
+            self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._pressed = False
+        self.update()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
+        if self._kind == "close":
+            if self._pressed:
+                bg = QColor("#c50f1f")
+            elif self._hovered:
+                bg = QColor("#e81123")
+            else:
+                bg = None
+        else:
+            if self._pressed:
+                bg = QColor(255, 255, 255, 58)
+            elif self._hovered:
+                bg = QColor(255, 255, 255, 36)
+            else:
+                bg = None
+
+        if bg is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(bg)
+            painter.drawRoundedRect(rect, 5.0, 5.0)
+
+        stroke_color = QColor("#ffffff") if (self._hovered or self._pressed) else QColor(228, 228, 231, 195)
+        pen = QPen(stroke_color, 1.35 if (self._hovered or self._pressed) else 1.25)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        cx = self.width() / 2.0
+        cy = self.height() / 2.0
+
+        if self._kind == "minimize":
+            painter.drawLine(int(cx - 5.0), int(cy), int(cx + 5.0), int(cy))
+        elif self._kind == "maximize":
+            painter.drawRoundedRect(QRectF(cx - 4.75, cy - 4.75, 9.5, 9.5), 1.2, 1.2)
+        elif self._kind == "restore":
+            # Front square + overlapping top-right back frame (exact Windows 11 restore icon)
+            front = QRectF(cx - 5.2, cy - 3.2, 8.0, 8.0)
+            painter.drawRoundedRect(front, 1.1, 1.1)
+            back_path = QPainterPath()
+            back_path.moveTo(cx - 3.0, cy - 3.2)
+            back_path.lineTo(cx - 3.0, cy - 5.2)
+            back_path.lineTo(cx + 4.8, cy - 5.2)
+            back_path.lineTo(cx + 4.8, cy + 2.6)
+            back_path.lineTo(cx + 2.8, cy + 2.6)
+            painter.drawPath(back_path)
+        elif self._kind == "close":
+            d = 4.6
+            painter.drawLine(QPoint(int(round(cx - d)), int(round(cy - d))), QPoint(int(round(cx + d)), int(round(cy + d))))
+            painter.drawLine(QPoint(int(round(cx + d)), int(round(cy - d))), QPoint(int(round(cx - d)), int(round(cy + d))))
+
+        painter.end()
+
+
+class ToolbarIconButton(QPushButton):
+    """
+    Minimal borderless toolbar icon button: transparent at rest with subtle light-gray icon,
+    highlights with a soft glass pill and crisp bright icon on hover.
+    """
+
+    def __init__(self, icon_name: str, normal_color: str = "#cbd5e1", hover_color: str = "#ffffff", icon_size: int = 13, parent=None):
+        super().__init__(parent)
+        self._icon_name = icon_name
+        self._normal_color = normal_color
+        self._hover_color = hover_color
+        self._icon_size = icon_size
+        self._hovered = False
+        self._pressed = False
+        self.setFixedSize(28, 26)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.setObjectName("ToolIconBtn")
+        self.setIconSize(QSize(icon_size, icon_size))
+        self._refresh_icon()
+
+    def set_icon_state(self, icon_name: str = None, normal_color: str = None, hover_color: str = None):
+        if icon_name is not None:
+            self._icon_name = icon_name
+        if normal_color is not None:
+            self._normal_color = normal_color
+        if hover_color is not None:
+            self._hover_color = hover_color
+        self._refresh_icon()
+
+    def _refresh_icon(self):
+        col = self._hover_color if (self._hovered or self._pressed) else self._normal_color
+        self.setIcon(IconFactory.create_icon(self._icon_name, col, self._icon_size))
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self._refresh_icon()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._pressed = False
+        self._refresh_icon()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._pressed = True
+            self._refresh_icon()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._pressed = False
+        self._refresh_icon()
+        super().mouseReleaseEvent(event)
+
+
 class LyricOverlayWindow(QWidget):
     request_settings = Signal()
     request_search = Signal()
@@ -330,10 +490,10 @@ class LyricOverlayWindow(QWidget):
         layout.setSpacing(8)
 
         # ---------------------------------------------------------
-        # 1. Sleek Top Control & Mode Switcher Bar
+        # 1. Sleek Top Control & Mode Switcher Bar (Windows 11 Minimal Hover Style)
         # ---------------------------------------------------------
         self.top_bar = QHBoxLayout()
-        self.top_bar.setSpacing(6)
+        self.top_bar.setSpacing(3)
 
         self.lbl_song_icon = QLabel()
         self.lbl_song_icon.setPixmap(IconFactory.create_pixmap("music", "#ffffff", 14))
@@ -343,97 +503,89 @@ class LyricOverlayWindow(QWidget):
         self.lbl_song_info = QLabel("Đang chờ phát nhạc...")
         self.lbl_song_info.setObjectName("SongInfoLabel")
         self.lbl_song_info.setStyleSheet(
-            "font-weight: bold; font-size: 13px; color: #ffffff; "
+            "font-weight: bold; font-size: 13px; color: #ffffff; padding-left: 3px; "
             "font-family: 'Segoe UI', 'Yu Gothic UI', 'Meiryo UI', 'Malgun Gothic', 'Microsoft YaHei UI', sans-serif;"
         )
         self.top_bar.addWidget(self.lbl_song_info, stretch=1)
 
         # Segmented Mode Switcher: Mode 1 (Video + Lyric) | Mode 2 (Lyric Only)
         self.btn_mode1 = QPushButton(" Video")
-        self.btn_mode1.setIcon(IconFactory.create_icon("film", "#ffffff", 14))
+        self.btn_mode1.setIcon(IconFactory.create_icon("film", "#ffffff", 13))
         self.btn_mode1.setToolTip("Mode 1: Video bên phải + Lyric bên trái (nền mờ & màu tự động theo video)")
-        self.btn_mode1.setFixedHeight(24)
+        self.btn_mode1.setFixedHeight(26)
         self.btn_mode1.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_mode1.clicked.connect(lambda: self.set_display_mode(1))
 
         self.btn_mode2 = QPushButton(" Lyric")
-        self.btn_mode2.setIcon(IconFactory.create_icon("align_center", "#ffffff", 14))
+        self.btn_mode2.setIcon(IconFactory.create_icon("align_center", "#ffffff", 13))
         self.btn_mode2.setToolTip("Mode 2: Chỉ hiện Lyric ở giữa tab (nền mờ & màu tự động theo video, thu phóng linh hoạt)")
-        self.btn_mode2.setFixedHeight(24)
+        self.btn_mode2.setFixedHeight(26)
         self.btn_mode2.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_mode2.clicked.connect(lambda: self.set_display_mode(2))
 
         self.top_bar.addWidget(self.btn_mode1)
         self.top_bar.addWidget(self.btn_mode2)
 
-        # Mode 1 Fullscreen Toggle Button
-        self.btn_fullscreen = QPushButton()
-        self.btn_fullscreen.setIcon(IconFactory.create_icon("fullscreen", "#ffffff"))
-        self.btn_fullscreen.setToolTip("Phóng to toàn màn hình (F11) - Tắt độ mờ khi toàn màn hình")
-        self.btn_fullscreen.clicked.connect(self.toggle_fullscreen)
-
         # Mode 2 Zoom Out / Zoom In Controls
-        self.btn_zoom_out = QPushButton()
-        self.btn_zoom_out.setIcon(IconFactory.create_icon("zoom_out", "#ffffff"))
+        self.btn_zoom_out = ToolbarIconButton("zoom_out", "#cbd5e1", "#ffffff")
         self.btn_zoom_out.setToolTip("Thu nhỏ chữ & cửa sổ (Ctrl + Cuộn chuột xuống)")
         self.btn_zoom_out.clicked.connect(lambda: self.zoom_lyrics(-2))
 
-        self.btn_zoom_in = QPushButton()
-        self.btn_zoom_in.setIcon(IconFactory.create_icon("zoom_in", "#ffffff"))
+        self.btn_zoom_in = ToolbarIconButton("zoom_in", "#cbd5e1", "#ffffff")
         self.btn_zoom_in.setToolTip("Phóng to chữ & cửa sổ (Ctrl + Cuộn chuột lên)")
         self.btn_zoom_in.clicked.connect(lambda: self.zoom_lyrics(2))
 
-        # Action Buttons
-        self.btn_translate = QPushButton()
-        self.btn_translate.setIcon(IconFactory.create_icon(
-            "language", "#38bdf8" if self.settings.get("enable_translation", True) else "#94a3b8"
-        ))
+        # Action Buttons (Borderless at rest, highlight on hover)
+        init_tr = bool(self.settings.get("enable_translation", True))
+        self.btn_translate = ToolbarIconButton("language", "#38bdf8" if init_tr else "#cbd5e1", "#7dd3fc" if init_tr else "#ffffff")
         self.btn_translate.setToolTip("Bật / Tắt dịch lời bài hát (hiện bản dịch bên dưới lời gốc)")
         self.btn_translate.clicked.connect(self.toggle_translation)
 
-        self.btn_search = QPushButton()
-        self.btn_search.setIcon(IconFactory.create_icon("search", "#ffffff"))
+        self.btn_search = ToolbarIconButton("search", "#cbd5e1", "#ffffff")
         self.btn_search.setToolTip("Tìm kiếm lời nhạc thủ công hoặc theo URL YouTube")
         self.btn_search.clicked.connect(self.request_search.emit)
 
-        self.btn_settings = QPushButton()
-        self.btn_settings.setIcon(IconFactory.create_icon("settings", "#ffffff"))
+        self.btn_settings = ToolbarIconButton("settings", "#cbd5e1", "#ffffff")
         self.btn_settings.setToolTip("Cài đặt giao diện, chế độ hiển thị, ngôn ngữ dịch & độ lệch thời gian")
         self.btn_settings.clicked.connect(self.request_settings.emit)
 
-        self.btn_lock = QPushButton()
-        self.btn_lock.setIcon(IconFactory.create_icon("unlock", "#ffffff"))
+        self.btn_lock = ToolbarIconButton("unlock", "#cbd5e1", "#ffffff")
         self.btn_lock.setToolTip("Khóa vị trí cửa sổ (Khóa để không bị kéo nhầm)")
         self.btn_lock.clicked.connect(self.toggle_lock)
 
-        self.btn_compact = QPushButton()
-        self.btn_compact.setIcon(IconFactory.create_icon("compact", "#ffffff"))
+        # Subtle vertical divider separating tools from Windows 11 window caption controls
+        self.top_divider = QFrame()
+        self.top_divider.setFixedSize(1, 14)
+        self.top_divider.setStyleSheet("background-color: rgba(255, 255, 255, 0.16); border: none;")
+
+        # Windows 11 Caption Controls: Minimize, Maximize/Restore/Compact, Close
+        self.btn_minimize = WindowCaptionButton("minimize")
+        self.btn_minimize.setToolTip("Thu nhỏ xuống thanh tác vụ")
+        self.btn_minimize.clicked.connect(self.showMinimized)
+
+        self.btn_fullscreen = WindowCaptionButton("maximize")
+        self.btn_fullscreen.setToolTip("Phóng to toàn màn hình (F11) - Tắt độ mờ khi toàn màn hình")
+        self.btn_fullscreen.clicked.connect(self.toggle_fullscreen)
+
+        self.btn_compact = WindowCaptionButton("restore")
         self.btn_compact.setToolTip("Thu gọn / Mở rộng cửa sổ")
         self.btn_compact.clicked.connect(self.toggle_compact)
 
-        self.btn_close = QPushButton()
-        self.btn_close.setIcon(IconFactory.create_icon("close", "#f43f5e"))
+        self.btn_close = WindowCaptionButton("close")
         self.btn_close.setToolTip("Thoát ứng dụng (Exit App)")
-        self.btn_close.setObjectName("CloseBtn")
         self.btn_close.clicked.connect(self.request_exit.emit)
 
-        for btn in [
-            self.btn_fullscreen, self.btn_zoom_out, self.btn_zoom_in,
-            self.btn_translate, self.btn_search, self.btn_settings, self.btn_lock,
-            self.btn_compact, self.btn_close
-        ]:
-            btn.setFixedSize(28, 24)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            if btn != self.btn_close:
-                btn.setObjectName("IconBtn")
-
-        self.top_bar.addWidget(self.btn_fullscreen)
         self.top_bar.addWidget(self.btn_zoom_out)
         self.top_bar.addWidget(self.btn_zoom_in)
         self.top_bar.addWidget(self.btn_translate)
         self.top_bar.addWidget(self.btn_search)
         self.top_bar.addWidget(self.btn_settings)
         self.top_bar.addWidget(self.btn_lock)
+        self.top_bar.addSpacing(3)
+        self.top_bar.addWidget(self.top_divider)
+        self.top_bar.addSpacing(3)
+        self.top_bar.addWidget(self.btn_minimize)
+        self.top_bar.addWidget(self.btn_fullscreen)
         self.top_bar.addWidget(self.btn_compact)
         self.top_bar.addWidget(self.btn_close)
 
@@ -695,7 +847,7 @@ class LyricOverlayWindow(QWidget):
             self.outer_layout.setContentsMargins(0, 0, 0, 0)
             self.container.set_corner_radius(0.0)
             self.size_grip.setVisible(False)
-            self.btn_fullscreen.setIcon(IconFactory.create_icon("exit_fullscreen", "#ffffff"))
+            self.btn_fullscreen.set_kind("restore")
             self.btn_fullscreen.setToolTip("Thu nhỏ về cửa sổ (Esc / F11) - Tự động bật lại độ mờ")
 
             screen = self.screen() or QApplication.primaryScreen()
@@ -705,7 +857,7 @@ class LyricOverlayWindow(QWidget):
             self.outer_layout.setContentsMargins(10, 10, 10, 10)
             self.container.set_corner_radius(14.0)
             self.size_grip.setVisible(not self.is_locked)
-            self.btn_fullscreen.setIcon(IconFactory.create_icon("fullscreen", "#ffffff"))
+            self.btn_fullscreen.set_kind("maximize")
             self.btn_fullscreen.setToolTip("Phóng to toàn màn hình (F11) - Tắt độ mờ khi toàn màn hình")
 
             if self.normal_mode1_geom:
@@ -1069,7 +1221,11 @@ class LyricOverlayWindow(QWidget):
 
         # Sync translate toggle icon state
         trans_enabled = bool(self.settings.get("enable_translation", True))
-        self.btn_translate.setIcon(IconFactory.create_icon("language", "#38bdf8" if trans_enabled else "#94a3b8"))
+        self.btn_translate.set_icon_state(
+            "language",
+            normal_color="#38bdf8" if trans_enabled else "#cbd5e1",
+            hover_color="#7dd3fc" if trans_enabled else "#ffffff"
+        )
         self.btn_translate.setToolTip(
             f"Tự động dịch & phiên âm đang BẬT ({self.settings.get('translate_lang', 'vi')}) — Nhấn để tắt"
             if trans_enabled else "Tự động dịch & phiên âm đang TẮT — Nhấn để bật"
@@ -1116,48 +1272,53 @@ class LyricOverlayWindow(QWidget):
                 padding: 1px 0;
             }}
             #ModeBtn {{
-                background-color: rgba(255, 255, 255, 0.10);
-                color: #ffffff;
-                border: 1px solid rgba(255, 255, 255, 0.18);
+                background-color: transparent;
+                color: rgba(255, 255, 255, 0.78);
+                border: none;
                 border-radius: 5px;
                 padding: 2px 9px;
                 font-size: 11px;
                 font-weight: bold;
             }}
             #ModeBtn:hover {{
-                background-color: rgba(255, 255, 255, 0.24);
+                background-color: rgba(255, 255, 255, 0.14);
+                color: #ffffff;
             }}
             #ModeBtnActive {{
                 background-color: {accent_hex};
                 color: #09090b;
-                border: 1px solid {accent_hex};
+                border: none;
                 border-radius: 5px;
                 padding: 2px 9px;
                 font-size: 11px;
                 font-weight: bold;
             }}
-            #IconBtn {{
-                background-color: rgba(255, 255, 255, 0.10);
+            #ToolIconBtn {{
+                background-color: transparent;
+                color: #cbd5e1;
+                border: none;
+                border-radius: 5px;
+            }}
+            #ToolIconBtn:hover {{
+                background-color: rgba(255, 255, 255, 0.14);
                 color: #ffffff;
-                border: 1px solid rgba(255, 255, 255, 0.15);
-                border-radius: 4px;
+            }}
+            #ToolIconBtn:pressed {{
+                background-color: rgba(255, 255, 255, 0.22);
+            }}
+            #IconBtn {{
+                background-color: transparent;
+                color: #cbd5e1;
+                border: none;
+                border-radius: 5px;
                 font-size: 11px;
             }}
             #IconBtn:hover {{
-                background-color: rgba(255, 255, 255, 0.25);
+                background-color: rgba(255, 255, 255, 0.15);
                 color: #ffffff;
             }}
-            #CloseBtn {{
-                background-color: rgba(244, 63, 94, 0.25);
-                color: #f43f5e;
-                border: 1px solid rgba(244, 63, 94, 0.5);
-                border-radius: 4px;
-                font-size: 11px;
-                font-weight: bold;
-            }}
-            #CloseBtn:hover {{
-                background-color: #f43f5e;
-                color: #ffffff;
+            #IconBtn:pressed {{
+                background-color: rgba(255, 255, 255, 0.24);
             }}
             #MediaBtn {{
                 background-color: rgba(255, 255, 255, 0.12);
@@ -1809,13 +1970,13 @@ class LyricOverlayWindow(QWidget):
     def toggle_lock(self):
         self.is_locked = not self.is_locked
         if self.is_locked:
-            self.btn_lock.setIcon(IconFactory.create_icon("lock", "#f59e0b"))
+            self.btn_lock.set_icon_state("lock", normal_color="#f59e0b", hover_color="#fbbf24")
             self.btn_lock.setToolTip("Cửa sổ đang bị khóa. Nhấn để mở khóa di chuyển.")
             self.lbl_song_info.setText("(Đã khóa vị trí) " + self.lbl_song_info.text().replace("(Đã khóa vị trí) ", ""))
             self.size_grip.setVisible(False)
             self.setCursor(Qt.CursorShape.ArrowCursor)
         else:
-            self.btn_lock.setIcon(IconFactory.create_icon("unlock", "#38bdf8"))
+            self.btn_lock.set_icon_state("unlock", normal_color="#cbd5e1", hover_color="#ffffff")
             self.btn_lock.setToolTip("Vị trí đang mở khóa. Bạn có thể kéo thả cửa sổ.")
             self.lbl_song_info.setText(self.lbl_song_info.text().replace("(Đã khóa vị trí) ", ""))
             self.size_grip.setVisible(True)
@@ -1928,7 +2089,7 @@ class LyricOverlayWindow(QWidget):
             self.btn_play.setVisible(False)
             self.btn_next.setVisible(False)
             self.vol_widget.setVisible(False)
-            self.btn_compact.setIcon(IconFactory.create_icon("expand", "#e2e8f0"))
+            self.btn_compact.set_kind("maximize")
             self.lbl_active_romaji.setVisible(False)
             self.lbl_active_trans.setVisible(False)
             self.resize(self.width(), 90)
@@ -1945,7 +2106,7 @@ class LyricOverlayWindow(QWidget):
             self.btn_play.setVisible(True)
             self.btn_next.setVisible(True)
             self.vol_widget.setVisible(True)
-            self.btn_compact.setIcon(IconFactory.create_icon("compact", "#e2e8f0"))
+            self.btn_compact.set_kind("restore")
             self._update_active_translation_label(self._effective_display_index())
             self.resize(self.width(), max(160, int(self.settings.get("win_h", 195))))
 

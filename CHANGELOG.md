@@ -1,5 +1,10 @@
 # Lịch sử cập nhật LyricNow
 
+## v1.1.0
+- **Thanh công cụ tối giản chuẩn Windows 11 với hiệu ứng di chuột mượt mà:** Bỏ toàn bộ viền/khung nút thô trên thanh công cụ — ở trạng thái thường các biểu tượng hiển thị gọn nhẹ trong suốt; khi di chuột vào nút nào sẽ nổi nền tương ứng, riêng nút đóng **`X`** đổi nền **đỏ (`#e81123`)** cùng dấu **`X` màu trắng** sắc nét.
+- **Bổ sung cụm nút điều khiển cửa sổ (`—` Thu nhỏ, `□`/`❐` Phóng to / Thu gọn, `✕` Đóng):** Hỗ trợ thu nhỏ cửa sổ xuống thanh tác vụ và biểu tượng vector nét mảnh đồng bộ trên cả Mode 1 và Mode 2.
+- **Chuẩn hóa quy tắc đánh số phiên bản:** Từ bản này áp dụng quy tắc tăng số theo mốc 9 (`1.0.9` -> `1.1.0`, tiếp theo `1.1.1` ... `1.1.9` -> `1.2.0`).
+
 ## v1.0.10
 - **Bắt đúng nhịp & đúng câu hát khi mở app ở bất kỳ đoạn nào (kể cả MV dài hơn bản Audio):** Ưu tiên đối khớp chính xác thời lượng giữa video YouTube (như *Lỡ Say Bye Là Bye* MV `4:08` hay *Đừng Làm Trái Tim Anh Đau* MV `5:26`) với bản lời có cùng thời lượng MV thay vì chọn nhầm bản audio studio ngắn hơn 30–45 giây bị lệch nhịp.
 - **Tự cập nhật lại bản lời khớp thời lượng khi Chrome báo trễ `duration`:** Khi mới chuyển bài mà trình duyệt chưa kịp gửi độ dài video, app sẽ tự căn chỉnh lại ngay khi có thời lượng thật và tự làm mới cache cũ bị lệch thời lượng.

@@ -6,6 +6,53 @@ import requests
 
 _CJK_SCRIPT_RE = re.compile(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]')
 _CJK_RUN_RE = re.compile(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+')
+_LRC_OFFSET_TAG_RE = re.compile(r'^\[offset\s*:\s*([+-]?\d+)\s*\]$', re.IGNORECASE)
+_LRC_CREDIT_LINE_RE = re.compile(
+    "(?i)^\\s*(?:"
+    "(?:bài\\s*hát|ca\\s*sĩ|sáng\\s*tác|thể\\s*hiện|nhạc\\s*sĩ|hòa\\s*âm|phối\\s*khí|lời\\s*bài\\s*hát|"
+    "title|artist|album|composer|lyricist|arranger|producer|performed\\s*by|written\\s*by|produced\\s*by|"
+    "by|singer|vocal|lyrics\\s*by|music\\s*by)\\s*[:：\\-]|"
+    "(?:作词|作詞|作曲|编曲|編曲|演唱|制作人|製作人|混音|监制|監製|词|詞|曲|歌|原唱|翻唱)\\s*[:：]|"
+    "[\u266a\u266b\U0001f3b5\U0001f3b6\\*\\-~=_•·\\.]+$"
+    ")"
+)
+_INTRO_OFFSET_CACHE = {}
+
+
+def fetch_youtube_intro_offset(video_id: str, timeout: float = 2.5) -> float:
+    """
+    Queries SponsorBlock's public music_offtopic API for non-music cinematic intro duration on
+    YouTube Official MVs (e.g. [0.0, 12.145] -> returns 12.15s). Only counts segments starting
+    near 0:00 (start <= 3.0s) so outro/credits segments NEVER falsely shift lyrics!
+    """
+    if not video_id or len(video_id) != 11:
+        return 0.0
+    if video_id in _INTRO_OFFSET_CACHE:
+        return _INTRO_OFFSET_CACHE[video_id]
+    intro_end = 0.0
+    try:
+        url = f"https://sponsor.ajay.app/api/skipSegments?videoID={video_id}&category=music_offtopic"
+        resp = requests.get(
+            url,
+            headers={"User-Agent": "LyricNow/1.2 (Windows Desktop Lyrics App)"},
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            segs = resp.json()
+            if isinstance(segs, list):
+                for seg in segs:
+                    pair = seg.get("segment")
+                    if isinstance(pair, list) and len(pair) == 2:
+                        s_t = float(pair[0] or 0.0)
+                        e_t = float(pair[1] or 0.0)
+                        if s_t <= 3.0 and 3.0 <= e_t <= 90.0:
+                            intro_end = max(intro_end, round(e_t, 2))
+    except Exception:
+        pass
+    _INTRO_OFFSET_CACHE[video_id] = intro_end
+    if len(_INTRO_OFFSET_CACHE) > 128:
+        _INTRO_OFFSET_CACHE.pop(next(iter(_INTRO_OFFSET_CACHE)))
+    return intro_end
 
 
 class LyricsProvider:
@@ -31,6 +78,7 @@ class LyricsProvider:
         inline_ts_pattern = re.compile(r'<(\d+):(\d+)(?:[\.\:](\d+))?>')
         
         has_timestamps = False
+        lrc_header_offset_sec = 0.0
         raw_lines = lrc_text.splitlines()
 
         def _parse_ts(m_grp1, m_grp2, m_grp3) -> float:
@@ -47,6 +95,17 @@ class LyricsProvider:
             if not raw_line:
                 continue
 
+            m_off = _LRC_OFFSET_TAG_RE.match(raw_line)
+            if m_off:
+                try:
+                    # Standard LRC [offset:+ms]: positive moves lyrics earlier, negative moves lyrics later
+                    off_ms = int(m_off.group(1))
+                    if -30000 <= off_ms <= 30000:
+                        lrc_header_offset_sec = off_ms / 1000.0
+                except Exception:
+                    pass
+                continue
+
             matches = list(pattern.finditer(raw_line))
             if matches:
                 has_timestamps = True
@@ -60,9 +119,10 @@ class LyricsProvider:
                     # Any prefix before first inline tag uses line start timestamp
                     prefix_txt = raw_after_line_ts[:inline_matches[0].start()]
                     if prefix_txt:
-                        parsed_words.append({"time": _parse_ts(matches[0].group(1), matches[0].group(2), matches[0].group(3)), "text": prefix_txt})
+                        w_t0 = max(0.0, _parse_ts(matches[0].group(1), matches[0].group(2), matches[0].group(3)) - lrc_header_offset_sec)
+                        parsed_words.append({"time": w_t0, "text": prefix_txt})
                     for idx_im, im in enumerate(inline_matches):
-                        w_time = _parse_ts(im.group(1), im.group(2), im.group(3))
+                        w_time = max(0.0, _parse_ts(im.group(1), im.group(2), im.group(3)) - lrc_header_offset_sec)
                         seg_end = inline_matches[idx_im + 1].start() if idx_im + 1 < len(inline_matches) else len(raw_after_line_ts)
                         w_txt = raw_after_line_ts[im.end():seg_end]
                         if w_txt:
@@ -73,7 +133,7 @@ class LyricsProvider:
                 if not text:
                     continue
                 for m in matches:
-                    time_in_sec = _parse_ts(m.group(1), m.group(2), m.group(3))
+                    time_in_sec = max(0.0, _parse_ts(m.group(1), m.group(2), m.group(3)) - lrc_header_offset_sec)
                     entry = {"time": time_in_sec, "text": text}
                     if parsed_words and len(matches) == 1:
                         entry["words"] = parsed_words
@@ -81,6 +141,10 @@ class LyricsProvider:
 
         if has_timestamps and lines:
             lines.sort(key=lambda x: x["time"])
+            # Strip leading non-vocal credit/metadata lines (e.g. 'Bài hát:', 'Ca sĩ:', '作词:', music-note symbols)
+            # during the first 15s so the app waits cleanly on Intro until real singing begins!
+            while len(lines) > 4 and lines[0]["time"] <= 15.0 and _LRC_CREDIT_LINE_RE.search(lines[0]["text"]):
+                lines.pop(0)
             # Deduplicate identical-timestamp bilingual LRC pairs (keep original primary line)
             deduped = []
             for item in lines:

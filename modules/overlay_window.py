@@ -1,3 +1,5 @@
+import ctypes
+from ctypes import wintypes
 import os
 import sys
 import time
@@ -9,6 +11,33 @@ from modules.qt_compat import (
     QPainter, QPainterPath, QPen, QPixmap, QRectF, QRect, QSize, QSizePolicy
 )
 from modules.icon_factory import IconFactory
+try:
+    from PyQt6.QtCore import QAbstractNativeEventFilter
+except ImportError:
+    from PySide6.QtCore import QAbstractNativeEventFilter
+
+
+class _WinMoveResizeEventFilter(QAbstractNativeEventFilter):
+    """Safely listens for Win32 WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE without overriding QWidget.nativeEvent."""
+
+    def __init__(self, window):
+        super().__init__()
+        self._window = window
+
+    def nativeEventFilter(self, eventType, message):
+        try:
+            if bytes(eventType) in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
+                win = self._window
+                if win is not None and win.isVisible():
+                    msg = wintypes.MSG.from_address(int(message))
+                    if msg.hWnd == int(win.winId()):
+                        if msg.message == 0x0231:  # WM_ENTERSIZEMOVE
+                            win._begin_move_resize_lock()
+                        elif msg.message == 0x0232:  # WM_EXITSIZEMOVE
+                            win._end_move_resize_lock()
+        except Exception:
+            pass
+        return False, 0
 from modules.volume_manager import VolumeManager
 from modules.theme_extractor import ThemeExtractor
 from modules.video_player import RoundedVideoDisplay
@@ -431,6 +460,11 @@ class LyricOverlayWindow(QWidget):
         self.active_edge = None
         self.press_geom = None
         self.press_global_pos = QPoint()
+        self._in_size_move = False
+        self._pending_settings_after_move = False
+        self._native_move_filter = None
+        self._pending_yt_intro_sec = 0.0
+        self._is_bt_output_active = False
 
         self.current_media_state = None
         self.current_bt_state = None
@@ -484,6 +518,14 @@ class LyricOverlayWindow(QWidget):
             self.setWindowIcon(QIcon(ico_path))
 
     def closeEvent(self, event):
+        if getattr(self, "_native_move_filter", None) is not None:
+            app_inst = QApplication.instance()
+            if app_inst is not None:
+                try:
+                    app_inst.removeNativeEventFilter(self._native_move_filter)
+                except Exception:
+                    pass
+            self._native_move_filter = None
         if hasattr(self, "sync_timer") and self.sync_timer:
             self.sync_timer.stop()
         if hasattr(self, "vol_sync_timer") and self.vol_sync_timer:
@@ -684,6 +726,7 @@ class LyricOverlayWindow(QWidget):
         self.video_display = RoundedVideoDisplay(self.container)
         self.video_display.clicked.connect(lambda: self.media_listener.send_control("play_pause") if self.media_listener else None)
         self.video_display.video_id_resolved.connect(self._on_video_id_resolved)
+        self.video_display.intro_offset_resolved.connect(self._on_youtube_intro_offset_resolved)
         self.video_display.artwork_ready.connect(self._on_hd_artwork_ready)
         self.video_display.video_frame_artwork_ready.connect(self._on_video_frame_artwork_ready)
 
@@ -1278,6 +1321,62 @@ class LyricOverlayWindow(QWidget):
         if not self.current_video_id:
             self.current_video_id = vid
 
+    def _on_youtube_intro_offset_resolved(self, req_key: str, vid: str, intro_sec: float):
+        """Stores SponsorBlock non-music MV intro length and aligns studio-timed lyrics cleanly."""
+        if intro_sec < 3.0:
+            return
+        if req_key and self._current_video_req_key and req_key != self._current_video_req_key:
+            return
+        self._pending_yt_intro_sec = float(intro_sec)
+        self._maybe_apply_mv_intro_offset()
+
+    def _maybe_apply_mv_intro_offset(self):
+        """
+        Automatically delays studio-timed lyrics on YouTube Official MVs that have a verified
+        non-music cinematic intro (e.g. 12.15s intro before music starts) so lyrics wait at
+        'Intro' until vocals actually begin — without ever shifting MV-timed or user-tuned songs!
+        """
+        intro_sec = float(getattr(self, "_pending_yt_intro_sec", 0.0) or 0.0)
+        if intro_sec < 3.0 or not self.current_lyrics:
+            return
+        if not self.current_lyrics.get("has_real_timestamps"):
+            return
+        src_str = str(self.current_lyrics.get("source") or "")
+        if ("Manual" in src_str) or ("Custom" in src_str):
+            return
+        # Never overwrite a user's manual sync offset or an already-applied auto intro offset
+        if self.current_lyrics.get("user_sync_offset") or self.current_lyrics.get("_mv_intro_applied"):
+            return
+        if abs(float(self.current_lyrics.get("sync_offset") or 0.0)) >= 0.5:
+            return
+
+        vid_dur = float(getattr(self.current_media_state, "duration", 0.0) or 0.0) if self.current_media_state else 0.0
+        if vid_dur <= 30.0:
+            return
+        src_dur = float(self.current_lyrics.get("source_duration") or 0.0)
+        lines = self.current_lyrics.get("lines") or []
+        if len(lines) < 5:
+            return
+        t_last = float(lines[-1]["time"])
+
+        # Only apply when video is genuinely longer than the studio LRC (proving LRC lacks the MV intro!)
+        should_delay = False
+        if src_dur > 30.0:
+            if (vid_dur - src_dur) >= max(3.0, intro_sec * 0.45):
+                should_delay = True
+        else:
+            if (vid_dur - t_last) >= (intro_sec + 4.0):
+                should_delay = True
+
+        if should_delay:
+            auto_off = -round(min(intro_sec, 45.0), 2)
+            self.current_lyrics["sync_offset"] = auto_off
+            self.current_lyrics["_mv_intro_applied"] = True
+            self.settings["sync_offset"] = auto_off
+            self.current_line_index = -99
+            print(f"[Overlay] Applied MV cinematic intro sync offset {auto_off:+.2f}s (vid_dur={vid_dur:.1f}s, src_dur={src_dur:.1f}s)")
+            self.update_lyric_display()
+
     def _on_hd_artwork_ready(self, req_key: str, img_bytes: bytes):
         if not img_bytes:
             return
@@ -1390,6 +1489,7 @@ class LyricOverlayWindow(QWidget):
         is_hp = any(k in low for k in ("headphone", "headset", "earphone", "bluetooth", "airpods", "buds", "tws", "tai nghe"))
         if not is_hp and bt_name and len(bt_name) >= 3:
             is_hp = (bt_name in low) or any(w in low for w in bt_name.split() if len(w) >= 4)
+        self._is_bt_output_active = bool(is_hp and any(k in low for k in ("bluetooth", "airpods", "buds", "tws", "hands-free", "a2dp")) or (is_hp and bool(bt_name)))
         accent_hex = self.adaptive_palette.get("accent_hex", "#38bdf8")
         if is_hp or not low:
             self.lbl_bt_icon.setPixmap(IconFactory.create_pixmap("headphones", "#ffffff", 13))
@@ -1523,6 +1623,11 @@ class LyricOverlayWindow(QWidget):
     # ---------------------------------------------------------
     def apply_settings(self, settings: dict):
         self.settings = settings
+        # Defer heavy QSS/opacity re-application while user is actively dragging/resizing window via DWM
+        # so UpdateLayeredWindow never fires mid-drag and snaps the window backwards!
+        if getattr(self, "_in_size_move", False):
+            self._pending_settings_after_move = True
+            return
         new_mode = int(settings.get("display_mode", self.display_mode))
         if new_mode in (1, 2, 3) and new_mode != self.display_mode:
             self.display_mode = new_mode
@@ -2179,6 +2284,7 @@ class LyricOverlayWindow(QWidget):
         self.lbl_active_trans.setVisible(False)
 
         # Snap immediately to exact live playback timestamp BEFORE kicking off priority translation!
+        self._maybe_apply_mv_intro_offset()
         self.update_lyric_display()
         self._trigger_translation_if_needed()
 
@@ -2245,6 +2351,7 @@ class LyricOverlayWindow(QWidget):
             self._prev_track_gsmtc_bytes = self._last_gsmtc_thumb_bytes
             self._last_gsmtc_thumb_bytes = None
             self.current_video_id = None
+            self._pending_yt_intro_sec = 0.0
             self.current_lyrics = None
             self.current_line_index = -99
             self.settings["sync_offset"] = 0.0
@@ -2375,7 +2482,7 @@ class LyricOverlayWindow(QWidget):
         if idx < 0:
             self.lbl_prev2.setText("")
             self.lbl_prev.setText("")
-            is_intro = bool(lines and lines[0]["time"] > 2.0 and self.current_media_state)
+            is_intro = bool(lines and lines[0]["time"] > 0.35 and self.current_media_state)
             self.lbl_active.setText(intro_txt if is_intro else lines[0]["text"])
             if hasattr(self, "karaoke_widget"):
                 if is_intro:
@@ -2395,7 +2502,16 @@ class LyricOverlayWindow(QWidget):
             self.lbl_next.setText(lines[idx + 1]["text"] if idx + 1 < len(lines) else "")
             self.lbl_next2.setText(lines[idx + 2]["text"] if idx + 2 < len(lines) else "")
 
+    def _get_audio_latency_comp(self) -> float:
+        """
+        Compensates for Chrome GSMTC decoded clock leading actual audible output through
+        Windows WASAPI + Bluetooth A2DP (~0.45s on Bluetooth headphones, ~0.22s on PC speakers).
+        """
+        return 0.45 if getattr(self, "_is_bt_output_active", False) else 0.22
+
     def update_lyric_display(self):
+        if getattr(self, "_in_size_move", False):
+            return
         try:
             self._update_lyric_display_inner()
         except Exception as e:
@@ -2430,7 +2546,11 @@ class LyricOverlayWindow(QWidget):
             self.lbl_next2.setText("")
             return
 
-        current_time = self.current_media_state.get_current_position() + float(self.settings.get("sync_offset") or 0.0)
+        current_time = (
+            self.current_media_state.get_current_position()
+            - self._get_audio_latency_comp()
+            + float(self.settings.get("sync_offset") or 0.0)
+        )
 
         active_idx = -1
         for i, line in enumerate(lines):
@@ -2542,12 +2662,13 @@ class LyricOverlayWindow(QWidget):
 
         target_time = lines[target_idx]["time"]
         if self.current_media_state:
-            raw_pos = self.current_media_state.get_current_position()
+            raw_pos = self.current_media_state.get_current_position() - self._get_audio_latency_comp()
             needed_offset = max(-45.0, min(75.0, round(target_time - raw_pos, 2)))
             self.settings["sync_offset"] = needed_offset
 
             if self.current_lyrics:
                 self.current_lyrics["sync_offset"] = needed_offset
+                self.current_lyrics["user_sync_offset"] = True
                 raw_t = self.current_media_state.title.strip()
                 clean_t = self.lyrics_provider.clean_title(raw_t)
                 clean_a = self.current_media_state.artist.strip()
@@ -2731,8 +2852,63 @@ class LyricOverlayWindow(QWidget):
             QTimer.singleShot(0, lambda: self._update_song_title_position(animate=False))
 
     # ---------------------------------------------------------
-    # Mouse Edge Resize & Dragging System
+    # Smooth Zero-Snap-Back Windows DWM Drag & Resize System
     # ---------------------------------------------------------
+    def _begin_move_resize_lock(self):
+        """
+        Suspends layered-window repaints (UpdateLayeredWindow) while Windows DWM slides or resizes
+        the frameless translucent overlay so Qt's backingstore NEVER fights DWM and snaps the
+        window backwards mid-drag!
+        """
+        if self._in_size_move:
+            return
+        self._in_size_move = True
+        if hasattr(self, "sync_timer") and self.sync_timer:
+            self.sync_timer.stop()
+        if hasattr(self, "vol_sync_timer") and self.vol_sync_timer:
+            self.vol_sync_timer.stop()
+        if hasattr(self, "video_display") and self.video_display:
+            self.video_display.set_repaint_suspended(True)
+
+    def _end_move_resize_lock(self):
+        """Resumes 60 FPS video/lyric updates cleanly the instant Windows DWM finishes move/resize."""
+        if not self._in_size_move:
+            return
+        self._in_size_move = False
+        if hasattr(self, "video_display") and self.video_display:
+            self.video_display.set_repaint_suspended(False)
+        if hasattr(self, "sync_timer") and self.sync_timer:
+            self.sync_timer.start(25 if self.display_mode == 3 else 50)
+        if hasattr(self, "vol_sync_timer") and self.vol_sync_timer:
+            self.vol_sync_timer.start(450)
+        if not self.is_fullscreen:
+            self.settings["win_x"] = self.x()
+            self.settings["win_y"] = self.y()
+            if self.display_mode == 1:
+                self.settings["mode1_w"] = self.width()
+                self.settings["mode1_h"] = self.height()
+            elif self.display_mode == 3:
+                self.settings["mode3_w"] = self.width()
+                self.settings["mode3_h"] = self.height()
+            elif not self.is_compact:
+                self.settings["win_w"] = self.width()
+                self.settings["win_h"] = self.height()
+        if getattr(self, "_pending_settings_after_move", False):
+            self._pending_settings_after_move = False
+            self.apply_settings(self.settings)
+        self.update_lyric_display()
+
+    def _verify_move_resize_still_active(self):
+        """Safety unlock in case user clicked without dragging and Windows didn't emit WM_EXITSIZEMOVE."""
+        if not self._in_size_move:
+            return
+        try:
+            lbtn_down = bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+            if not lbtn_down:
+                self._end_move_resize_lock()
+        except Exception:
+            self._end_move_resize_lock()
+
     def _get_edge_at(self, pos: QPoint):
         w, h = self.width(), self.height()
         m = self.BORDER_MARGIN
@@ -2833,28 +3009,43 @@ class LyricOverlayWindow(QWidget):
 
             if edge:
                 qt_edges = self._edge_to_qt_edges(edge)
-                if win_handle and qt_edges is not None and win_handle.startSystemResize(qt_edges):
-                    event.accept()
-                    return
+                if win_handle and qt_edges is not None:
+                    self._begin_move_resize_lock()
+                    if win_handle.startSystemResize(qt_edges):
+                        QTimer.singleShot(220, self._verify_move_resize_still_active)
+                        event.accept()
+                        return
+                    self._end_move_resize_lock()
+                self._begin_move_resize_lock()
                 self.active_edge = edge
                 self.press_geom = self.geometry()
                 self.press_global_pos = event.globalPosition().toPoint()
             else:
-                # Hand drag directly to Windows DWM (native 60-144 FPS, zero jitter/lag!)
-                if win_handle and win_handle.startSystemMove():
-                    event.accept()
-                    return
+                # Hand drag directly to Windows DWM with layered repaints paused (zero stutter, zero snap-back!)
+                if win_handle:
+                    self._begin_move_resize_lock()
+                    if win_handle.startSystemMove():
+                        QTimer.singleShot(220, self._verify_move_resize_still_active)
+                        event.accept()
+                        return
+                    self._end_move_resize_lock()
+                self._begin_move_resize_lock()
                 self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        if not self.is_fullscreen:
+        if not self.is_fullscreen and not getattr(self, "_in_size_move", False):
             self.settings["win_x"] = self.x()
             self.settings["win_y"] = self.y()
 
     def showEvent(self, event):
         super().showEvent(event)
+        if self._native_move_filter is None:
+            app_inst = QApplication.instance()
+            if app_inst is not None:
+                self._native_move_filter = _WinMoveResizeEventFilter(self)
+                app_inst.installNativeEventFilter(self._native_move_filter)
         QTimer.singleShot(0, self._fit_active_lyric_fonts)
         QTimer.singleShot(0, self._position_karaoke_video_btn)
         QTimer.singleShot(0, lambda: self._update_song_title_position(animate=False))
@@ -2884,6 +3075,8 @@ class LyricOverlayWindow(QWidget):
         self.active_edge = None
         self.drag_position = QPoint()
         self.setCursor(Qt.CursorShape.ArrowCursor)
+        if getattr(self, "_in_size_move", False):
+            self._end_move_resize_lock()
 
         if self.is_fullscreen:
             return

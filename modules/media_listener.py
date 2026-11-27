@@ -321,19 +321,24 @@ class MediaListenerWorker(QObject):
                     self.current_thumb_bytes = valid_thumb
                 self.stale_upd_time = None
 
-                # Only reset stale position if switching from a previous song AND Chrome carried over the old timeline!
-                # Also remember stale_upd_time so Tick 2+ do NOT re-apply the old track's age until Chrome sends a fresh timeline!
-                if was_tracking_prev and true_pos > 3.0:
+                # Guard against Chrome carrying over old timeline / pre-roll ad / initial buffering timestamp
+                # so new songs NEVER start several seconds ahead before the video actually begins singing!
+                upd_age = (
+                    (datetime.now(timezone.utc) - upd_time).total_seconds()
+                    if (upd_time is not None and getattr(upd_time, "year", 0) >= 2020)
+                    else 0.0
+                )
+                if was_tracking_prev and true_pos > 2.0:
                     stale_upd = (upd_time is not None and prev_upd_time is not None and upd_time == prev_upd_time)
-                    stale_pos = (prev_raw_pos is not None and abs(raw_pos - prev_raw_pos) < 1.5 and raw_pos > 3.0)
-                    old_upd_for_fresh_zero = (
-                        win_is_playing and raw_pos < 2.0 and upd_time is not None
-                        and getattr(upd_time, "year", 0) >= 2020
-                        and (datetime.now(timezone.utc) - upd_time).total_seconds() > 3.0
-                    )
+                    stale_pos = (prev_raw_pos is not None and abs(raw_pos - prev_raw_pos) < 1.5 and raw_pos > 2.5)
+                    old_upd_for_fresh_zero = (win_is_playing and raw_pos < 1.0 and upd_age > 1.5)
                     if stale_upd or stale_pos or old_upd_for_fresh_zero:
                         true_pos = 0.0
                         self.stale_upd_time = upd_time
+                elif (not was_tracking_prev) and win_is_playing and raw_pos < 0.25 and upd_age > 2.5 and upd_age < 25.0:
+                    # On fresh startup while YouTube is still buffering at 0:00 with a stale timestamp
+                    true_pos = 0.0
+                    self.stale_upd_time = upd_time
 
                 self.last_raw_pos = raw_pos
                 self.last_upd_time = upd_time

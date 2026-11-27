@@ -32,6 +32,7 @@ def _norm_match_tokens(text: str) -> set:
 class VideoStreamResolver(QThread):
     """Background worker that resolves the EXACT YouTube video ID and direct playable MP4 stream URL."""
     video_id_found = Signal(str, str)        # req_key, video_id (emitted immediately so video ID locks!)
+    intro_offset_found = Signal(str, str, float)  # req_key, video_id, non-music intro duration (sec)
     artwork_fetched = Signal(str, bytes)     # req_key, thumb_bytes (emitted immediately before yt-dlp)
     resolved = Signal(str, str, str, bytes)  # req_key, video_id, stream_url, thumb_bytes
     failed = Signal(str, str)                # req_key, reason
@@ -173,6 +174,18 @@ class VideoStreamResolver(QThread):
             # Deliver real HD YouTube thumbnail immediately (~0.3s) without waiting for yt-dlp!
             self.artwork_fetched.emit(self.req_key, thumb_bytes)
 
+        # Query non-music cinematic MV intro duration asynchronously (SponsorBlock music_offtopic)
+        # so studio-timed lyrics wait cleanly during MV intros instead of starting before vocals!
+        try:
+            from modules.lyrics_provider import fetch_youtube_intro_offset
+            intro_sec = fetch_youtube_intro_offset(vid, timeout=2.5)
+            if intro_sec >= 3.0 and not self._cancelled:
+                self.intro_offset_found.emit(self.req_key, vid, float(intro_sec))
+        except Exception:
+            pass
+        if self._cancelled:
+            return
+
         # In Mode 2 (or Mode 3 with Video OFF), only fetch HD artwork without decoding MP4 stream!
         if self.artwork_only:
             return
@@ -216,12 +229,14 @@ class RoundedVideoDisplay(QWidget):
     """
     clicked = Signal()
     video_id_resolved = Signal(str, str)            # req_key, locked YouTube video_id
+    intro_offset_resolved = Signal(str, str, float) # req_key, video_id, MV intro sec
     artwork_ready = Signal(str, bytes)              # req_key, thumb_bytes (HD YouTube thumbnail)
     video_frame_artwork_ready = Signal(str, QImage) # req_key, decoded video frame fallback
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._app_lang = "vi"
+        self._repaint_suspended = False
         self.setMinimumSize(220, 130)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(tr(self._app_lang, "video_click_tip"))
@@ -261,6 +276,15 @@ class RoundedVideoDisplay(QWidget):
             self.player.mediaStatusChanged.connect(self._on_media_status_changed)
             self.player.errorOccurred.connect(self._on_player_error)
 
+    def set_repaint_suspended(self, suspended: bool):
+        """Suspends per-frame widget repaints during native Windows DWM drag/resize to prevent layered snap-back."""
+        suspended = bool(suspended)
+        if self._repaint_suspended != suspended:
+            self._repaint_suspended = suspended
+            if not suspended:
+                if not self._repaint_suspended:
+                    self.update()
+
     def set_language(self, lang: str):
         self._app_lang = lang or "vi"
         self.setToolTip(tr(self._app_lang, "video_click_tip"))
@@ -290,7 +314,8 @@ class RoundedVideoDisplay(QWidget):
             pix = QPixmap()
             if pix.loadFromData(img_bytes):
                 self.fallback_pixmap = pix
-                self.update()
+                if not self._repaint_suspended:
+                    self.update()
 
     def load_track(self, title: str, artist: str = "", thumb_bytes: bytes = None,
                    video_id: str = None, position_sec: float = 0.0, is_playing: bool = False,
@@ -352,6 +377,7 @@ class RoundedVideoDisplay(QWidget):
             need_audio=False, artwork_only=artwork_only, duration=duration
         )
         self.resolver.video_id_found.connect(self._on_video_id_found)
+        self.resolver.intro_offset_found.connect(self._on_intro_offset_found)
         self.resolver.artwork_fetched.connect(self._on_artwork_fetched)
         self.resolver.resolved.connect(self._on_stream_resolved)
         self.resolver.failed.connect(self._on_stream_failed)
@@ -363,6 +389,11 @@ class RoundedVideoDisplay(QWidget):
             return
         self.current_video_id = vid
         self.video_id_resolved.emit(req_key, vid)
+
+    def _on_intro_offset_found(self, req_key: str, vid: str, intro_sec: float):
+        if req_key != self.current_req_key or intro_sec < 3.0:
+            return
+        self.intro_offset_resolved.emit(req_key, vid, float(intro_sec))
 
     def _on_artwork_fetched(self, req_key: str, thumb_bytes: bytes):
         if req_key != self.current_req_key or not thumb_bytes:
@@ -415,7 +446,8 @@ class RoundedVideoDisplay(QWidget):
                     self.player.play()
                 else:
                     self.player.pause()
-                self.update()
+                if not self._repaint_suspended:
+                    self.update()
 
     def _on_player_error(self, err, err_str):
         print(f"[VideoPlayer Error] {err}: {err_str}")
@@ -449,7 +481,8 @@ class RoundedVideoDisplay(QWidget):
                         if self._frame_check_count >= 25 or self._is_non_black_frame(img):
                             self._emitted_frame_artwork = True
                             self.video_frame_artwork_ready.emit(self.current_req_key, img.copy())
-                self.update()
+                if not self._repaint_suspended:
+                    self.update()
 
     def seek_immediate(self, position_sec: float):
         """Immediately jumps embedded video playback to position_sec (for responsive +/-10s seek)."""
@@ -491,6 +524,7 @@ class RoundedVideoDisplay(QWidget):
             old_r.cancel()
             try:
                 old_r.video_id_found.disconnect()
+                old_r.intro_offset_found.disconnect()
                 old_r.artwork_fetched.disconnect()
                 old_r.resolved.disconnect()
                 old_r.failed.disconnect()

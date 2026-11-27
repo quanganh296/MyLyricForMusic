@@ -1,5 +1,12 @@
 # Lịch sử cập nhật LyricNow
 
+## v1.2.0
+- **Kéo di chuyển cửa sổ mượt tuyệt đối — hết hẳn giật lag và giựt lùi trên Windows:** Chặn hoàn toàn xung đột `UpdateLayeredWindow` của Qt với Windows DWM trong lúc kéo/đổi cỡ cửa sổ (`WM_ENTERSIZEMOVE` / `WM_EXITSIZEMOVE`) bằng cách tạm dừng vẽ lại khung video/lyric và hoãn ghi QSS trong suốt thao tác kéo rồi khôi phục tức thì khi thả chuột.
+- **Đồng bộ lời bài hát chính xác tuyệt đối — hết chạy nhanh hơn 1–2 câu và hết chạy lời trước khi video hát:**
+  - Tự động nhận diện đoạn intro không lời của MV YouTube (qua dữ liệu `SponsorBlock music_offtopic`) để giữ màn hình ở trạng thái `Nhạc dạo đầu` đúng đến giây ca sĩ bắt đầu hát trên MV (không bị chạy trước khi nhạc vào).
+  - Bù độ trễ đường truyền âm thanh trình duyệt + Windows WASAPI / tai nghe Bluetooth (`0.45s` với Bluetooth, `0.22s` với loa máy tính) giúp chữ sáng và đổi câu khớp chính xác với âm thanh thực tế tới tai.
+  - Hỗ trợ thẻ chuẩn LRC `[offset:±ms]`, tự lọc các dòng credit/tiêu đề ở đầu file LRC (`Bài hát:`, `Ca sĩ:`, `作词:`, `作曲:`...) và chặn lỗi đồng hồ YouTube chạy trước khi video mới còn đang đệm ở `0:00`.
+
 ## v1.1.9
 - **Tìm kiếm lời bài hát bất đồng bộ 100% — hết delay/đứng lyric và video khi mở tìm kiếm:** Chuyển toàn bộ thao tác tìm lời trực tuyến, phân tích link YouTube và tải xem trước LRC sang các luồng nền (`_OnlineSearchWorker`, `_YouTubeSearchWorker`, `_RemoteLrcWorker`) kết hợp mở hộp thoại Tìm kiếm không khóa cửa sổ chính, giúp nhạc, video và lời Karaoke tiếp tục chạy mượt 60 FPS không hề giật lag.
 - **Giao diện Cài đặt đồng bộ nền mờ & màu sắc thích ứng giống hệt cửa sổ ứng dụng:** Bảng Cài đặt (`SettingsDialog`) hiển thị cùng nền mờ từ ảnh/video bài hát đang phát kèm thẻ kính mờ trong suốt và màu nhấn thích ứng (`accent_hex`), đồng thời tự động chuyển nền theo thời gian thực nếu bài hát đổi trong lúc đang mở Cài đặt.

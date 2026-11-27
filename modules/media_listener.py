@@ -1,4 +1,6 @@
 import asyncio
+import ctypes
+import threading
 import time
 from datetime import datetime, timezone
 from modules.qt_compat import QObject, Signal, QThread
@@ -432,12 +434,20 @@ class MediaListenerWorker(QObject):
         except Exception:
             return None
 
-    def send_control(self, action: str):
+    def send_control(self, action: str, value=None):
+        """Dispatches Windows GSMTC media control (play/pause, seek +/-10s, next/prev track) asynchronously off the GUI thread."""
         if not WINSDK_AVAILABLE:
             return
-        asyncio.run(self._async_send_control(action))
+        t = threading.Thread(target=self._run_control_sync, args=(action, value), daemon=True)
+        t.start()
 
-    async def _async_send_control(self, action: str):
+    def _run_control_sync(self, action: str, value=None):
+        try:
+            asyncio.run(self._async_send_control(action, value))
+        except Exception as e:
+            print(f"[MediaControl Thread Error] {e}")
+
+    async def _async_send_control(self, action: str, value=None):
         try:
             manager = await MediaManager.request_async()
             if not manager:
@@ -451,8 +461,32 @@ class MediaListenerWorker(QObject):
                         await session.try_pause_async()
                     else:
                         await session.try_play_async()
+                elif action == "seek_relative":
+                    delta_sec = float(value or 0.0)
+                    playback = session.get_playback_info()
+                    is_playing = bool(playback and playback.playback_status == PlaybackStatus.PLAYING)
+                    pb_rate = getattr(playback, "playback_rate", None) if playback else None
+                    rate = float(pb_rate) if (pb_rate is not None and 0.2 <= float(pb_rate) <= 4.0) else 1.0
+                    timeline = session.get_timeline_properties()
+                    dur = timeline.end_time.total_seconds() if (timeline and timeline.end_time) else 0.0
+                    _, _, curr_pos, _ = self._compute_gsmtc_position(timeline, is_playing, dur, playback_rate=rate)
+                    target_sec = max(0.0, curr_pos + delta_sec)
+                    if dur > 1.0:
+                        target_sec = min(dur - 0.5, target_sec)
+                    ticks = int(round(target_sec * 10_000_000))
+                    ok = await session.try_change_playback_position_async(ticks)
+                    if ok:
+                        self.last_win_pos = target_sec
+                        self.last_win_time = time.time()
                 elif action == "next":
-                    await session.try_skip_next_async()
+                    ok = await session.try_skip_next_async()
+                    if not ok:
+                        # Safe hardware media-key fallback for players that ignore GSMTC skip
+                        try:
+                            ctypes.windll.user32.keybd_event(0xB0, 0, 0, 0)  # VK_MEDIA_NEXT_TRACK
+                            ctypes.windll.user32.keybd_event(0xB0, 0, 2, 0)
+                        except Exception:
+                            pass
                 elif action == "prev":
                     await session.try_skip_previous_async()
         except Exception as e:

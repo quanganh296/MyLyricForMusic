@@ -165,6 +165,7 @@ class LyricOverlayApp:
         self._update_worker = None
         self._old_update_workers = []
         self._active_modal = None
+        self._search_dialog = None
         self._exiting = False
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.check_for_updates)
@@ -208,6 +209,12 @@ class LyricOverlayApp:
                 except Exception:
                     pass
                 self._active_modal = None
+            if getattr(self, "_search_dialog", None) is not None:
+                try:
+                    self._search_dialog.close()
+                except Exception:
+                    pass
+                self._search_dialog = None
             if getattr(self.overlay, "_audio_popup", None):
                 try:
                     self.overlay._audio_popup.close()
@@ -247,6 +254,19 @@ class LyricOverlayApp:
         self.overlay.apply_settings(self.settings)
 
     def open_search(self):
+        # Reuse existing non-modal SearchDialog if already open; opening non-modally + async search
+        # guarantees ZERO delay to running lyrics, Karaoke highlight & live video playback!
+        if getattr(self, "_search_dialog", None) is not None:
+            try:
+                if self._search_dialog.isVisible():
+                    self._search_dialog.raise_()
+                    self._search_dialog.activateWindow()
+                    return
+                self._search_dialog.close()
+            except Exception:
+                pass
+            self._search_dialog = None
+
         current_query = ""
         if self.overlay.current_media_state and self.overlay.current_media_state.title:
             title = (self.overlay.current_media_state.title or "").strip()
@@ -256,15 +276,23 @@ class LyricOverlayApp:
             else:
                 clean_a = self.lyrics_provider._normalize_artist(artist)
                 current_query = f"{title} {clean_a}".strip() if clean_a else title
-        
+
         dlg = SearchDialog(self.lyrics_provider, initial_query=current_query, parent=self.overlay)
+        dlg.setModal(False)
         dlg.lyric_selected.connect(self.overlay.set_custom_lyrics)
-        self._active_modal = dlg
+        dlg.finished.connect(lambda _r, d=dlg: self._on_search_dialog_finished(d))
+        self._search_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_search_dialog_finished(self, dlg):
+        if getattr(self, "_search_dialog", None) is dlg:
+            self._search_dialog = None
         try:
-            dlg.exec()
-        finally:
-            if self._active_modal is dlg:
-                self._active_modal = None
+            dlg.deleteLater()
+        except Exception:
+            pass
 
     def exit_app(self):
         if getattr(self, "_exiting", False):
@@ -273,6 +301,12 @@ class LyricOverlayApp:
         print("[App] Exiting LyricOverLay...")
         if hasattr(self, "update_timer") and self.update_timer:
             self.update_timer.stop()
+        if getattr(self, "_search_dialog", None) is not None:
+            try:
+                self._search_dialog.close()
+            except Exception:
+                pass
+            self._search_dialog = None
         if getattr(self, "_update_worker", None) and self._update_worker.isRunning():
             self._update_worker.wait(500)
         # Update settings with current window coordinates (ignore fullscreen geometry)

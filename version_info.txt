@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 1, 8, 0),
-    prodvers=(1, 1, 8, 0),
+    filevers=(1, 1, 9, 0),
+    prodvers=(1, 1, 9, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -18,12 +18,12 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'LyricNow'),
             StringStruct('FileDescription', 'LyricNow - Floating Music Lyrics & Karaoke Overlay'),
-            StringStruct('FileVersion', '1.1.8.0'),
+            StringStruct('FileVersion', '1.1.9.0'),
             StringStruct('InternalName', 'LyricNow'),
             StringStruct('LegalCopyright', 'Copyright (c) 2026 LyricNow'),
             StringStruct('OriginalFilename', 'LyricNow.exe'),
             StringStruct('ProductName', 'LyricNow'),
-            StringStruct('ProductVersion', '1.1.8.0'),
+            StringStruct('ProductVersion', '1.1.9.0'),
           ]
         )
       ]

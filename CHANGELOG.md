@@ -1,5 +1,10 @@
 # Lịch sử cập nhật LyricNow
 
+## v1.1.9
+- **Tìm kiếm lời bài hát bất đồng bộ 100% — hết delay/đứng lyric và video khi mở tìm kiếm:** Chuyển toàn bộ thao tác tìm lời trực tuyến, phân tích link YouTube và tải xem trước LRC sang các luồng nền (`_OnlineSearchWorker`, `_YouTubeSearchWorker`, `_RemoteLrcWorker`) kết hợp mở hộp thoại Tìm kiếm không khóa cửa sổ chính, giúp nhạc, video và lời Karaoke tiếp tục chạy mượt 60 FPS không hề giật lag.
+- **Giao diện Cài đặt đồng bộ nền mờ & màu sắc thích ứng giống hệt cửa sổ ứng dụng:** Bảng Cài đặt (`SettingsDialog`) hiển thị cùng nền mờ từ ảnh/video bài hát đang phát kèm thẻ kính mờ trong suốt và màu nhấn thích ứng (`accent_hex`), đồng thời tự động chuyển nền theo thời gian thực nếu bài hát đổi trong lúc đang mở Cài đặt.
+- **Thêm 2 nút tua video/bài hát 10 giây (`-10s`, `+10s`) và nút chuyển video/bài hát tiếp theo (`Bài Tiếp`):** Gửi lệnh điều khiển bất đồng bộ qua Windows GSMTC (`try_change_playback_position_async` / `try_skip_next_async`) kèm đồng bộ tức thì cho video và lời bài hát trong app, tự động thu gọn thông minh khi cửa sổ Mode 2 hẹp và hỗ trợ đầy đủ 8 ngôn ngữ.
+
 ## v1.1.8
 - **Nhận diện chính xác tai nghe Trái / Phải đang đeo trên Apple AirPods (`AirPods 2` / `AirPods Pro`):** Nâng cấp bộ giải mã Apple Proximity Pairing theo đúng chuẩn 27 byte (`CAPod` / `AirPodsDesktop`), đọc chính xác cảm biến đeo tai (`in_ear`) cùng cờ đổi chiều khi tai còn lại nằm trong hộp sạc (`bit 6` XOR) và ưu tiên gói tin từ bên tai đang đeo — sửa triệt để tình trạng đeo tai bên **Phải** nhưng bị hiển thị thành **Trái**.
 - **Gộp trọn vẹn toàn bộ bản sửa ổn định từ v1.1.7:** Không còn cửa sổ lỗi `Failed to load Python DLL ...\_MEIxxxx\python311.dll` khi tự khởi động lại sau update, không kẹt con trỏ/dừng video khi đóng bảng chọn thiết bị loa/tai nghe, và lọc ổn định % pin Bluetooth hết nhảy 90%–60%–50%–90%.

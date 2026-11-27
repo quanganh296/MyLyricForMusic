@@ -451,6 +451,17 @@ class RoundedVideoDisplay(QWidget):
                             self.video_frame_artwork_ready.emit(self.current_req_key, img.copy())
                 self.update()
 
+    def seek_immediate(self, position_sec: float):
+        """Immediately jumps embedded video playback to position_sec (for responsive +/-10s seek)."""
+        self.pending_seek_sec = max(0.0, float(position_sec))
+        if not self.player or not self.is_stream_loaded:
+            return
+        dur_ms = self.player.duration()
+        target_ms = int(round(self.pending_seek_sec * 1000))
+        if dur_ms > 0:
+            target_ms = min(target_ms, max(0, dur_ms - 400))
+        self.player.setPosition(max(0, target_ms))
+
     def sync_to_media(self, position_sec: float, is_playing: bool):
         self.pending_seek_sec = max(0.0, position_sec)
         self.pending_playing = is_playing

@@ -401,6 +401,7 @@ class LyricOverlayWindow(QWidget):
     request_search = Signal()
     request_exit = Signal()
     settings_autosave = Signal(dict)
+    backdrop_updated = Signal(object, dict)
 
     BORDER_MARGIN = 8  # Pixel margin for edge resize cursor detection
 
@@ -712,7 +713,12 @@ class LyricOverlayWindow(QWidget):
         # 3. Media Controls Bar & Volume Control & Resizable Grip
         # ---------------------------------------------------------
         self.bottom_bar = QHBoxLayout()
-        self.bottom_bar.setSpacing(10)
+        self.bottom_bar.setSpacing(6)
+
+        self.btn_seek_back = QPushButton(" -10s")
+        self.btn_seek_back.setIcon(IconFactory.create_icon("rewind_10", "#ffffff", 12))
+        self.btn_seek_back.setToolTip("Tua lùi video / bài hát 10 giây")
+        self.btn_seek_back.clicked.connect(lambda: self.seek_media_relative(-10.0))
 
         self.btn_prev = QPushButton(" Câu Trước")
         self.btn_prev.setIcon(IconFactory.create_icon("prev", "#ffffff"))
@@ -729,9 +735,22 @@ class LyricOverlayWindow(QWidget):
         self.btn_next.setToolTip("Chuyển tới câu tiếp theo & tự động đồng bộ thời gian chuẩn vào YouTube")
         self.btn_next.clicked.connect(self.jump_to_next_line)
 
-        for mbtn in [self.btn_prev, self.btn_play, self.btn_next]:
+        self.btn_seek_fwd = QPushButton(" +10s")
+        self.btn_seek_fwd.setIcon(IconFactory.create_icon("forward_10", "#ffffff", 12))
+        self.btn_seek_fwd.setToolTip("Tua nhanh video / bài hát 10 giây")
+        self.btn_seek_fwd.clicked.connect(lambda: self.seek_media_relative(10.0))
+
+        self.btn_next_track = QPushButton(" Bài Tiếp")
+        self.btn_next_track.setIcon(IconFactory.create_icon("next_track", "#ffffff", 12))
+        self.btn_next_track.setToolTip("Chuyển sang video / bài hát tiếp theo")
+        self.btn_next_track.clicked.connect(self.skip_next_track)
+
+        for mbtn in [self.btn_prev, self.btn_play, self.btn_next, self.btn_next_track]:
             mbtn.setCursor(Qt.CursorShape.PointingHandCursor)
             mbtn.setObjectName("MediaBtn")
+        for sbtn in [self.btn_seek_back, self.btn_seek_fwd]:
+            sbtn.setCursor(Qt.CursorShape.PointingHandCursor)
+            sbtn.setObjectName("SeekBtn")
 
         # Volume Controls (wrapped in a clean container so % label never overlaps slider in narrow Mode 2)
         self.vol_widget = QWidget()
@@ -817,9 +836,12 @@ class LyricOverlayWindow(QWidget):
         )
         self.bottom_bar.addWidget(self.bt_pill)
         self.bottom_bar.addStretch()
+        self.bottom_bar.addWidget(self.btn_seek_back)
         self.bottom_bar.addWidget(self.btn_prev)
         self.bottom_bar.addWidget(self.btn_play)
         self.bottom_bar.addWidget(self.btn_next)
+        self.bottom_bar.addWidget(self.btn_seek_fwd)
+        self.bottom_bar.addWidget(self.btn_next_track)
         self.bottom_bar.addStretch()
         self.bottom_bar.addWidget(self.vol_widget)
 
@@ -1173,6 +1195,7 @@ class LyricOverlayWindow(QWidget):
         self.video_display.set_border_color(QColor(255, 255, 255, 65))
         if clear_display:
             self.video_display.stop_video(clear_artwork=True)
+        self.backdrop_updated.emit(QPixmap(), self.adaptive_palette)
         self.apply_settings(self.settings)
 
     def _maybe_apply_gsmtc_thumbnail(self, thumb_bytes: bytes):
@@ -1290,6 +1313,7 @@ class LyricOverlayWindow(QWidget):
         c = QColor(palette.get("accent_hex", "#ffffff"))
         c.setAlpha(110)
         self.video_display.set_border_color(c)
+        self.backdrop_updated.emit(blurred, palette)
         self.apply_settings(self.settings)
 
     def _update_adaptive_theme_from_bytes(self, img_bytes: bytes):
@@ -1460,14 +1484,13 @@ class LyricOverlayWindow(QWidget):
                 tr(lang, "tip_karaoke_video_on" if self.karaoke_show_video else "tip_karaoke_video_off")
             )
         if hasattr(self, "btn_prev"):
-            self.btn_prev.setText(tr(lang, "prev_line"))
+            self._update_bottom_bar_labels()
+            self.btn_seek_back.setToolTip(tr(lang, "tip_seek_back_10"))
             self.btn_prev.setToolTip(tr(lang, "tip_prev"))
-        if hasattr(self, "btn_play"):
-            self.btn_play.setText(tr(lang, "play_pause"))
             self.btn_play.setToolTip(tr(lang, "tip_play"))
-        if hasattr(self, "btn_next"):
-            self.btn_next.setText(tr(lang, "next_line"))
             self.btn_next.setToolTip(tr(lang, "tip_next"))
+            self.btn_seek_fwd.setToolTip(tr(lang, "tip_seek_fwd_10"))
+            self.btn_next_track.setToolTip(tr(lang, "tip_next_track"))
         if hasattr(self, "btn_zoom_out"):
             self.btn_zoom_out.setToolTip(tr(lang, "tip_zoom_out"))
             self.btn_zoom_in.setToolTip(tr(lang, "tip_zoom_in"))
@@ -1716,13 +1739,27 @@ class LyricOverlayWindow(QWidget):
                 color: #ffffff;
                 border: 1px solid rgba(255, 255, 255, 0.25);
                 border-radius: 6px;
-                padding: 4px 12px;
-                font-size: 12px;
+                padding: 4px 9px;
+                font-size: 11px;
                 font-weight: bold;
             }}
             #MediaBtn:hover {{
                 background-color: rgba(255, 255, 255, 0.28);
                 color: #ffffff;
+            }}
+            #SeekBtn {{
+                background-color: rgba(255, 255, 255, 0.10);
+                color: #f1f5f9;
+                border: 1px solid rgba(255, 255, 255, 0.22);
+                border-radius: 6px;
+                padding: 4px 7px;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            #SeekBtn:hover {{
+                background-color: rgba(255, 255, 255, 0.26);
+                color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 0.45);
             }}
             #BtPill {{
                 background-color: rgba(255, 255, 255, 0.11);
@@ -2293,7 +2330,7 @@ class LyricOverlayWindow(QWidget):
         except Exception:
             pass
 
-        # If search came from a YouTube URL, load that exact video & thumbnail in Mode 1!
+        # If search came from a YouTube URL, load that exact video & thumbnail asynchronously (zero GUI freeze!)
         custom_vid = lyrics_data.get("video_id")
         thumb_url = lyrics_data.get("thumbnail_url")
         if custom_vid or thumb_url:
@@ -2301,15 +2338,6 @@ class LyricOverlayWindow(QWidget):
             self._reset_track_artwork(clear_display=True)
         if custom_vid:
             self.current_video_id = custom_vid
-        if thumb_url:
-            try:
-                resp = requests.get(thumb_url, timeout=4)
-                if resp.status_code == 200 and len(resp.content) > 1500:
-                    self.current_thumb_bytes = resp.content
-                    self._artwork_priority = 2
-                    self._update_adaptive_theme_from_source(self.current_thumb_bytes)
-            except Exception:
-                pass
 
         if custom_vid or thumb_url or not self.current_media_state:
             self._trigger_track_media_load()
@@ -2443,6 +2471,49 @@ class LyricOverlayWindow(QWidget):
         # Feed real-time song position on every tick so Mode 3 Karaoke lights up word-by-word at exact tempo
         if self.display_mode == 3 and hasattr(self, "karaoke_widget"):
             self.karaoke_widget.set_playback_time(current_time)
+
+    def _update_bottom_bar_labels(self):
+        """Adapts bottom control button labels cleanly across wide Mode 1/3 and narrow Mode 2."""
+        if not hasattr(self, "btn_prev"):
+            return
+        lang = self._lang()
+        narrow = self.width() < 780
+        self.btn_seek_back.setText("-10s" if narrow else tr(lang, "seek_back_10"))
+        self.btn_seek_fwd.setText("+10s" if narrow else tr(lang, "seek_fwd_10"))
+        if narrow:
+            self.btn_prev.setText("")
+            self.btn_play.setText("")
+            self.btn_next.setText("")
+            self.btn_next_track.setText("")
+        else:
+            self.btn_prev.setText(tr(lang, "prev_line"))
+            self.btn_play.setText(tr(lang, "play_pause"))
+            self.btn_next.setText(tr(lang, "next_line"))
+            self.btn_next_track.setText(tr(lang, "next_track"))
+
+    def seek_media_relative(self, delta_sec: float):
+        """Seeks the active video / song backward or forward by delta_sec (e.g. -10s / +10s) instantaneously."""
+        delta_sec = float(delta_sec)
+        if self.media_listener:
+            self.media_listener.send_control("seek_relative", delta_sec)
+
+        # Optimistic instant UI & embedded video snap (<16ms) before GSMTC next poll confirms!
+        if self.current_media_state:
+            curr = self.current_media_state.get_current_position()
+            target = max(0.0, curr + delta_sec)
+            dur = float(getattr(self.current_media_state, "duration", 0.0) or 0.0)
+            if dur > 1.0:
+                target = min(dur - 0.5, target)
+            self.current_media_state.position = target
+            self.current_media_state.created_at = time.time()
+            if hasattr(self, "video_display") and self.video_display:
+                self.video_display.seek_immediate(target)
+            self.update_lyric_display()
+
+    def skip_next_track(self):
+        """Skips immediately to the next video / song in YouTube, Spotify, Chrome, or Edge."""
+        if self.media_listener:
+            self.media_listener.send_control("next")
 
     def jump_to_prev_line(self):
         if not self.current_lyrics or not self.current_lyrics.get("lines"):
@@ -2624,9 +2695,12 @@ class LyricOverlayWindow(QWidget):
             self.btn_translate.setVisible(False)
             self.btn_search.setVisible(False)
             self.btn_settings.setVisible(False)
+            self.btn_seek_back.setVisible(False)
             self.btn_prev.setVisible(False)
             self.btn_play.setVisible(False)
             self.btn_next.setVisible(False)
+            self.btn_seek_fwd.setVisible(False)
+            self.btn_next_track.setVisible(False)
             self.vol_widget.setVisible(False)
             self.btn_compact.set_kind("maximize")
             self.lbl_active_romaji.setVisible(False)
@@ -2643,9 +2717,12 @@ class LyricOverlayWindow(QWidget):
             self.btn_translate.setVisible(True)
             self.btn_search.setVisible(True)
             self.btn_settings.setVisible(True)
+            self.btn_seek_back.setVisible(True)
             self.btn_prev.setVisible(True)
             self.btn_play.setVisible(True)
             self.btn_next.setVisible(True)
+            self.btn_seek_fwd.setVisible(True)
+            self.btn_next_track.setVisible(True)
             self.vol_widget.setVisible(True)
             self.btn_compact.set_kind("restore")
             self._apply_lyrics_top_margin()
@@ -2795,6 +2872,7 @@ class LyricOverlayWindow(QWidget):
                 self.settings["win_w"] = self.width()
                 self.settings["win_h"] = self.height()
         self._position_karaoke_video_btn()
+        self._update_bottom_bar_labels()
         if hasattr(self, "lbl_song_info") and not getattr(self.lbl_song_info, "_animating", False):
             self._update_song_title_position(animate=False)
         if hasattr(self, "lbl_active_trans") and hasattr(self, "lbl_active_romaji"):

@@ -1,10 +1,12 @@
 from modules.qt_compat import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QSpinBox, QDoubleSpinBox, QSlider, QPushButton, QGroupBox, QFormLayout,
-    Qt, Signal, QTabWidget, QWidget, QColorDialog, QColor
+    Qt, Signal, QTabWidget, QWidget, QColorDialog, QColor,
+    QPainter, QPixmap, QRectF
 )
 from modules.icon_factory import IconFactory
 from modules.i18n import APP_LANGUAGES, TRANSLATE_TARGET_LANGUAGES, tr
+
 
 class SettingsDialog(QDialog):
     settings_changed = Signal(dict)
@@ -27,36 +29,120 @@ class SettingsDialog(QDialog):
         self.app_lang = self.settings.get("app_lang", "vi")
         self.setWindowTitle(tr(self.app_lang, "settings_title"))
         self.setFixedSize(600, 650)
-        
+
+        # Match main app's live blurred video/album background & adaptive accent color!
+        self._bg_pixmap = QPixmap()
+        self._cached_bg = QPixmap()
+        self._cached_bg_size = None
+        self._accent_hex = "#38bdf8"
+        self._backdrop_connected = False
+
+        if parent is not None:
+            container = getattr(parent, "container", None)
+            if container is not None and hasattr(container, "bg_pixmap") and not container.bg_pixmap.isNull():
+                self._bg_pixmap = QPixmap(container.bg_pixmap)
+            pal = getattr(parent, "adaptive_palette", None)
+            if isinstance(pal, dict) and pal.get("accent_hex"):
+                self._accent_hex = pal["accent_hex"]
+            if hasattr(parent, "backdrop_updated"):
+                try:
+                    parent.backdrop_updated.connect(self.update_backdrop)
+                    self._backdrop_connected = True
+                except Exception:
+                    pass
+
         # Synchronize Settings Dialog opacity with current background opacity
         curr_op = float(self.settings.get("bg_opacity", 0.75))
         self.setWindowOpacity(max(0.15, curr_op))
 
         self.setup_ui()
+        self._apply_adaptive_stylesheet()
         self._apply_dialog_language(self.app_lang)
+
+    def update_backdrop(self, pixmap, palette: dict = None):
+        """Live-syncs Settings background & accent color whenever the main app switches song/artwork."""
+        self._bg_pixmap = QPixmap(pixmap) if (pixmap is not None and not pixmap.isNull()) else QPixmap()
+        self._cached_bg = QPixmap()
+        self._cached_bg_size = None
+        new_accent = (palette or {}).get("accent_hex") if isinstance(palette, dict) else None
+        if new_accent and new_accent != self._accent_hex:
+            self._accent_hex = new_accent
+            self._apply_adaptive_stylesheet()
+        self.update()
+
+    def _disconnect_backdrop(self):
+        if self._backdrop_connected and self.parent() is not None and hasattr(self.parent(), "backdrop_updated"):
+            try:
+                self.parent().backdrop_updated.disconnect(self.update_backdrop)
+            except Exception:
+                pass
+        self._backdrop_connected = False
+
+    def done(self, result: int):
+        self._disconnect_backdrop()
+        super().done(result)
+
+    def closeEvent(self, event):
+        self._disconnect_backdrop()
+        super().closeEvent(event)
+
+    def _ensure_cached_bg(self, w: int, h: int):
+        if self._cached_bg_size == (w, h) and not self._cached_bg.isNull():
+            return
+        if self._bg_pixmap.isNull() or w <= 0 or h <= 0:
+            self._cached_bg = QPixmap()
+            return
+        out = QPixmap(w, h)
+        out.fill(QColor(15, 23, 42))
+        p = QPainter(out)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        scaled = self._bg_pixmap.scaled(
+            w, h,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        sx = (scaled.width() - w) // 2
+        sy = (scaled.height() - h) // 2
+        p.drawPixmap(0, 0, scaled, sx, sy, w, h)
+        # Subtle dark glass veil so every control stays razor-sharp over bright album art
+        p.fillRect(QRectF(0, 0, w, h), QColor(10, 15, 28, 72))
+        p.end()
+        self._cached_bg = out
+        self._cached_bg_size = (w, h)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        w, h = self.width(), self.height()
+        if not self._bg_pixmap.isNull():
+            self._ensure_cached_bg(w, h)
+            if not self._cached_bg.isNull():
+                painter.drawPixmap(0, 0, self._cached_bg)
+                painter.end()
+                return
+        # Same deep slate glass base as main overlay when no track artwork is loaded
+        painter.fillRect(0, 0, w, h, QColor(15, 23, 42))
+        painter.end()
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
 
-        # Tab Widget with Gray Interface
         self.tabs = QTabWidget()
 
         # =========================================================
         # TAB 1: Giao diện & Độ trong suốt (Visual & Transparency)
         # =========================================================
         tab_visual = QWidget()
+        tab_visual.setObjectName("TransparentTab")
         t1_layout = QVBoxLayout(tab_visual)
         t1_layout.setSpacing(12)
         t1_layout.setContentsMargins(12, 14, 12, 14)
 
-        # Font & Style Group
         self.group_font = QGroupBox("Phông chữ & Màu sắc Lyric")
         form_font = QFormLayout(self.group_font)
         form_font.setSpacing(10)
 
-        # Font Family
         self.combo_font = QComboBox()
         self.combo_font.addItems([
             "Segoe UI", "Arial", "Roboto", "Tahoma", "Verdana",
@@ -66,7 +152,6 @@ class SettingsDialog(QDialog):
         self.lbl_font = QLabel("Phông chữ:")
         form_font.addRow(self.lbl_font, self.combo_font)
 
-        # Font Size with quick presets
         size_layout = QHBoxLayout()
         self.spin_size = QSpinBox()
         self.spin_size.setRange(14, 54)
@@ -84,18 +169,15 @@ class SettingsDialog(QDialog):
         self.lbl_font_size = QLabel("Kích thước chữ:")
         form_font.addRow(self.lbl_font_size, size_layout)
 
-        # Main Lyric Highlight Color Selection
         color_layout = QHBoxLayout()
         self.curr_color_hex = self.settings.get("color_highlight", "#38bdf8")
-        
+
         self.btn_color_preview = QPushButton()
         self.btn_color_preview.setFixedSize(28, 24)
         self.btn_color_preview.setToolTip("Màu chữ lyric đang chọn")
         self.btn_color_preview.setStyleSheet(f"background-color: {self.curr_color_hex}; border: 2px solid #ffffff; border-radius: 4px;")
-        
         color_layout.addWidget(self.btn_color_preview)
 
-        # Preset Color Pills
         color_pills = [
             ("Cyan", "#38bdf8"),
             ("Rose", "#f43f5e"),
@@ -112,12 +194,12 @@ class SettingsDialog(QDialog):
             btn_c.setFixedSize(22, 22)
             btn_c.setToolTip(name)
             btn_c.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_c.setStyleSheet(f"background-color: {hex_code}; border: 1px solid #52525b; border-radius: 11px;")
+            btn_c.setStyleSheet(f"background-color: {hex_code}; border: 1px solid rgba(255,255,255,0.45); border-radius: 11px;")
             btn_c.clicked.connect(lambda checked, h=hex_code: self.set_lyric_color(h))
             color_layout.addWidget(btn_c)
 
         self.btn_custom_color = QPushButton(" Bảng màu...")
-        self.btn_custom_color.setIcon(IconFactory.create_icon("palette", "#38bdf8"))
+        self.btn_custom_color.setIcon(IconFactory.create_icon("palette", "#ffffff"))
         self.btn_custom_color.setObjectName("PresetBtn")
         self.btn_custom_color.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_custom_color.clicked.connect(self.choose_custom_color)
@@ -126,7 +208,6 @@ class SettingsDialog(QDialog):
         self.lbl_main_color = QLabel("Màu chữ lyric chính:")
         form_font.addRow(self.lbl_main_color, color_layout)
 
-        # Color Theme Presets
         self.combo_theme = QComboBox()
         self.combo_theme.addItems(list(self.THEMES.keys()))
         current_theme = self.settings.get("theme_name", "Cyan Blue (Mặc định)")
@@ -138,7 +219,6 @@ class SettingsDialog(QDialog):
 
         t1_layout.addWidget(self.group_font)
 
-        # Window Transparency / Opacity Group
         self.group_opacity = QGroupBox("Độ trong suốt ứng dụng")
         op_v_layout = QVBoxLayout(self.group_opacity)
         op_v_layout.setSpacing(8)
@@ -149,13 +229,12 @@ class SettingsDialog(QDialog):
         curr_op_pct = int(self.settings.get("bg_opacity", 0.75) * 100)
         self.slider_opacity.setValue(curr_op_pct)
         self.lbl_opacity_val = QLabel(f"{curr_op_pct}%")
-        self.lbl_opacity_val.setStyleSheet("font-weight: bold; color: #38bdf8; font-size: 14px;")
-        
+        self.lbl_opacity_val.setObjectName("AccentValueLabel")
+
         op_slider_layout.addWidget(self.slider_opacity)
         op_slider_layout.addWidget(self.lbl_opacity_val)
         op_v_layout.addLayout(op_slider_layout)
 
-        # Quick Opacity Preset Buttons
         op_presets_layout = QHBoxLayout()
         self.op_preset_btns = []
         for key, val in [("op_25", 25), ("op_50", 50), ("op_75", 75), ("op_100", 100)]:
@@ -169,13 +248,12 @@ class SettingsDialog(QDialog):
         op_v_layout.addLayout(op_presets_layout)
 
         self.lbl_op_desc = QLabel("")
-        self.lbl_op_desc.setStyleSheet("color: #94a3b8; font-size: 11px; font-style: italic;")
+        self.lbl_op_desc.setStyleSheet("color: rgba(226, 232, 240, 0.82); font-size: 11px; font-style: italic; background: transparent;")
         op_v_layout.addWidget(self.lbl_op_desc)
 
         self.slider_opacity.valueChanged.connect(self.on_opacity_slider_changed)
         t1_layout.addWidget(self.group_opacity)
 
-        # Display Lines & Alignment Group
         self.group_lines = QGroupBox("Chế độ hiển thị & Căn lề")
         form_lines = QFormLayout(self.group_lines)
         form_lines.setSpacing(10)
@@ -200,12 +278,13 @@ class SettingsDialog(QDialog):
         form_lines.addRow(self.lbl_align_mode, self.combo_align)
 
         t1_layout.addWidget(self.group_lines)
-        self.tabs.addTab(tab_visual, IconFactory.create_icon("palette", "#38bdf8"), tr(self.app_lang, "tab_visual"))
+        self.tabs.addTab(tab_visual, IconFactory.create_icon("palette", "#ffffff"), tr(self.app_lang, "tab_visual"))
 
         # =========================================================
         # TAB 2: Đồng bộ thời gian (Time Sync & Offset)
         # =========================================================
         tab_sync = QWidget()
+        tab_sync.setObjectName("TransparentTab")
         t2_layout = QVBoxLayout(tab_sync)
         t2_layout.setSpacing(12)
         t2_layout.setContentsMargins(12, 14, 12, 14)
@@ -239,22 +318,22 @@ class SettingsDialog(QDialog):
         t2_layout.addWidget(self.group_sync)
 
         self.lbl_sync_info = QLabel("")
-        self.lbl_sync_info.setStyleSheet("color: #94a3b8; font-size: 12px; line-height: 1.4;")
+        self.lbl_sync_info.setStyleSheet("color: rgba(226, 232, 240, 0.88); font-size: 12px; line-height: 1.4; background: transparent;")
         self.lbl_sync_info.setWordWrap(True)
         t2_layout.addWidget(self.lbl_sync_info)
         t2_layout.addStretch()
 
-        self.tabs.addTab(tab_sync, IconFactory.create_icon("clock", "#38bdf8"), tr(self.app_lang, "tab_sync"))
+        self.tabs.addTab(tab_sync, IconFactory.create_icon("clock", "#ffffff"), tr(self.app_lang, "tab_sync"))
 
         # =========================================================
         # TAB 3: Ngôn ngữ ứng dụng & Dịch lời (App Language & Translation)
         # =========================================================
         tab_lang = QWidget()
+        tab_lang.setObjectName("TransparentTab")
         t3_layout = QVBoxLayout(tab_lang)
         t3_layout.setSpacing(12)
         t3_layout.setContentsMargins(12, 14, 12, 14)
 
-        # Group A: App Interface Language (Tiếng Việt, English, 日本語, 中文, 한국어, ภาษาไทย, Español, Français)
         self.group_app_lang = QGroupBox("Ngôn ngữ ứng dụng (App Language)")
         form_app_lang = QFormLayout(self.group_app_lang)
         form_app_lang.setSpacing(10)
@@ -271,7 +350,6 @@ class SettingsDialog(QDialog):
         form_app_lang.addRow(self.lbl_app_lang, self.combo_app_lang)
         t3_layout.addWidget(self.group_app_lang)
 
-        # Group B: Automatic Lyric Translation
         self.group_trans = QGroupBox("Dịch lời bài hát tự động")
         form_trans = QFormLayout(self.group_trans)
         form_trans.setSpacing(12)
@@ -313,136 +391,189 @@ class SettingsDialog(QDialog):
 
         self.lbl_lang_info = QLabel("")
         self.lbl_lang_info.setStyleSheet(
-            "color: #94a3b8; font-size: 12px; line-height: 1.45; "
+            "color: rgba(226, 232, 240, 0.88); font-size: 12px; line-height: 1.45; background: transparent; "
             "font-family: 'Segoe UI', 'Yu Gothic UI', 'Malgun Gothic', 'Microsoft YaHei UI', sans-serif;"
         )
         self.lbl_lang_info.setWordWrap(True)
         t3_layout.addWidget(self.lbl_lang_info)
         t3_layout.addStretch()
 
-        self.tabs.addTab(tab_lang, IconFactory.create_icon("language", "#38bdf8"), tr(self.app_lang, "tab_lang"))
+        self.tabs.addTab(tab_lang, IconFactory.create_icon("language", "#ffffff"), tr(self.app_lang, "tab_lang"))
 
         layout.addWidget(self.tabs)
 
         # Bottom Action Buttons
         btn_box = QHBoxLayout()
         self.btn_save = QPushButton(" Lưu cài đặt")
+        self.btn_save.setObjectName("PrimaryBtn")
         self.btn_save.setIcon(IconFactory.create_icon("save", "#09090b"))
         self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_save.clicked.connect(self.save_and_close)
         btn_box.addWidget(self.btn_save)
 
         self.btn_cancel = QPushButton(" Hủy")
-        self.btn_cancel.setIcon(IconFactory.create_icon("close", "#09090b"))
+        self.btn_cancel.setObjectName("SecondaryBtn")
+        self.btn_cancel.setIcon(IconFactory.create_icon("close", "#f8fafc"))
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_cancel.clicked.connect(self.reject)
         btn_box.addWidget(self.btn_cancel)
 
         layout.addLayout(btn_box)
 
-        # QSS Styling with Gray Tab Interface
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #18181b;
-                color: #e4e4e7;
-            }
-            /* Gray Tab Interface Styling */
-            QTabWidget::pane {
-                border: 1px solid #3f3f46;
-                border-radius: 8px;
-                background-color: #27272a;
-            }
-            QTabBar::tab {
-                background-color: #3f3f46;
-                color: #a1a1aa;
+    def _apply_adaptive_stylesheet(self):
+        accent = self._accent_hex or "#38bdf8"
+        ac = QColor(accent)
+        if not ac.isValid():
+            accent = "#38bdf8"
+            ac = QColor(accent)
+        accent_hover = ac.lighter(115).name()
+
+        # Refresh tab icons with adaptive accent tint
+        if hasattr(self, "tabs"):
+            self.tabs.setTabIcon(0, IconFactory.create_icon("palette", accent))
+            self.tabs.setTabIcon(1, IconFactory.create_icon("clock", accent))
+            self.tabs.setTabIcon(2, IconFactory.create_icon("language", accent))
+        if hasattr(self, "btn_custom_color"):
+            self.btn_custom_color.setIcon(IconFactory.create_icon("palette", accent))
+
+        self.setStyleSheet(f"""
+            QDialog {{
+                background: transparent;
+                color: #f1f5f9;
+            }}
+            #TransparentTab {{
+                background: transparent;
+            }}
+            QTabWidget::pane {{
+                border: 1px solid rgba(255, 255, 255, 0.20);
+                border-radius: 10px;
+                background-color: rgba(12, 18, 32, 0.56);
+            }}
+            QTabBar::tab {{
+                background-color: rgba(12, 18, 32, 0.48);
+                color: rgba(226, 232, 240, 0.80);
                 padding: 9px 18px;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
                 margin-right: 4px;
                 font-weight: bold;
                 font-size: 13px;
-                border: 1px solid #52525b;
+                border: 1px solid rgba(255, 255, 255, 0.16);
                 border-bottom: none;
-            }
-            QTabBar::tab:hover {
-                background-color: #52525b;
+            }}
+            QTabBar::tab:hover {{
+                background-color: rgba(255, 255, 255, 0.18);
                 color: #ffffff;
-            }
-            QTabBar::tab:selected {
-                background-color: #27272a;
-                color: #38bdf8;
-                border-top: 3px solid #38bdf8;
-                border-left: 1px solid #3f3f46;
-                border-right: 1px solid #3f3f46;
-            }
-            QGroupBox {
-                color: #38bdf8;
+            }}
+            QTabBar::tab:selected {{
+                background-color: rgba(12, 18, 32, 0.72);
+                color: {accent};
+                border-top: 3px solid {accent};
+                border-left: 1px solid rgba(255, 255, 255, 0.22);
+                border-right: 1px solid rgba(255, 255, 255, 0.22);
+            }}
+            QGroupBox {{
+                background-color: rgba(10, 15, 28, 0.42);
+                color: {accent};
                 font-weight: bold;
-                border: 1px solid #3f3f46;
-                border-radius: 8px;
-                margin-top: 8px;
+                border: 1px solid rgba(255, 255, 255, 0.16);
+                border-radius: 9px;
+                margin-top: 10px;
                 padding-top: 14px;
-            }
-            QGroupBox::title {
+            }}
+            QGroupBox::title {{
                 subcontrol-origin: margin;
                 left: 12px;
                 padding: 0 6px;
-            }
-            QLabel {
-                color: #d4d4d8;
+                background: transparent;
+            }}
+            QLabel {{
+                color: #f1f5f9;
                 font-size: 13px;
-            }
-            QComboBox, QSpinBox, QDoubleSpinBox {
-                background-color: #18181b;
-                color: #f4f4f5;
-                border: 1px solid #3f3f46;
+                background: transparent;
+            }}
+            #AccentValueLabel {{
+                font-weight: bold;
+                color: {accent};
+                font-size: 14px;
+                background: transparent;
+            }}
+            QComboBox, QSpinBox, QDoubleSpinBox {{
+                background-color: rgba(10, 15, 28, 0.68);
+                color: #f8fafc;
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 6px;
                 padding: 6px 10px;
                 font-family: 'Segoe UI', 'Yu Gothic UI', 'Malgun Gothic', 'Microsoft YaHei UI', sans-serif;
-            }
-            QSlider::groove:horizontal {
+            }}
+            QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{
+                border: 1px solid {accent};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: rgba(15, 23, 42, 0.96);
+                color: #f8fafc;
+                selection-background-color: {accent};
+                selection-color: #09090b;
+                border: 1px solid rgba(255, 255, 255, 0.22);
+            }}
+            QSlider::groove:horizontal {{
                 height: 6px;
-                background: #3f3f46;
+                background: rgba(255, 255, 255, 0.22);
                 border-radius: 3px;
-            }
-            QSlider::sub-page:horizontal {
-                background: #38bdf8;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {accent};
                 border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
+            }}
+            QSlider::handle:horizontal {{
                 background: #ffffff;
                 width: 16px;
                 height: 16px;
                 margin: -5px 0;
                 border-radius: 8px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #38bdf8;
-            }
-            #PresetBtn {
-                background-color: #18181b;
-                color: #38bdf8;
-                border: 1px solid #3f3f46;
-                border-radius: 4px;
+            }}
+            QSlider::handle:horizontal:hover {{
+                background: {accent};
+            }}
+            #PresetBtn {{
+                background-color: rgba(10, 15, 28, 0.62);
+                color: {accent};
+                border: 1px solid rgba(255, 255, 255, 0.20);
+                border-radius: 5px;
                 padding: 4px 8px;
                 font-size: 11px;
                 font-weight: bold;
-            }
-            #PresetBtn:hover {
-                background-color: #3f3f46;
+            }}
+            #PresetBtn:hover {{
+                background-color: rgba(255, 255, 255, 0.20);
                 color: #ffffff;
-            }
-            QPushButton {
-                background-color: #38bdf8;
+                border: 1px solid {accent};
+            }}
+            #PrimaryBtn {{
+                background-color: {accent};
                 color: #09090b;
                 font-weight: bold;
-                border-radius: 6px;
-                padding: 8px 16px;
+                border: none;
+                border-radius: 7px;
+                padding: 9px 16px;
                 font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #7dd3fc;
-            }
+            }}
+            #PrimaryBtn:hover {{
+                background-color: {accent_hover};
+            }}
+            #SecondaryBtn {{
+                background-color: rgba(255, 255, 255, 0.14);
+                color: #f8fafc;
+                font-weight: bold;
+                border: 1px solid rgba(255, 255, 255, 0.24);
+                border-radius: 7px;
+                padding: 9px 16px;
+                font-size: 13px;
+            }}
+            #SecondaryBtn:hover {{
+                background-color: rgba(255, 255, 255, 0.26);
+                color: #ffffff;
+            }}
         """)
 
     def set_lyric_color(self, hex_code: str):
@@ -466,16 +597,12 @@ class SettingsDialog(QDialog):
         val_float = max(0.15, value / 100.0)
         self.lbl_opacity_val.setText(f"{value}%")
         self.settings["bg_opacity"] = val_float
-        
-        # Live window opacity synchronization for Settings Dialog itself
+
         self.setWindowOpacity(val_float)
-        
-        # Live window opacity synchronization for main Lyrics Overlay Window
         if self.parent() and hasattr(self.parent(), "apply_settings"):
             self.parent().apply_settings(self.settings)
 
     def reject(self):
-        # Revert window opacity on both Settings Dialog and Overlay if canceled
         init_op = float(self.initial_settings.get("bg_opacity", 0.75))
         self.setWindowOpacity(max(0.15, init_op))
         if self.parent() and hasattr(self.parent(), "apply_settings"):
@@ -483,7 +610,6 @@ class SettingsDialog(QDialog):
         super().reject()
 
     def _apply_dialog_language(self, lang: str):
-        """Re-translates all SettingsDialog tabs, group titles, labels, combos and buttons live."""
         self.app_lang = lang or "vi"
         self.setWindowTitle(tr(self.app_lang, "settings_title"))
         self.tabs.setTabText(0, tr(self.app_lang, "tab_visual"))

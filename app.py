@@ -2,6 +2,9 @@ import sys
 import os
 import json
 import ctypes
+import threading
+import traceback
+from datetime import datetime
 
 # Add project root directory to path
 # When packaged via PyInstaller (--onefile), persist config.json & cache/ next to LyricNow.exe (not %TEMP%!)
@@ -14,6 +17,28 @@ else:
 
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
+
+ERROR_LOG_FILE = os.path.join(BASE_DIR, "lyricnow_error.log")
+
+
+def _log_unhandled_exception(exc_type, exc_value, exc_tb):
+    """Logs unhandled exceptions safely instead of letting PyQt6 silently abort the process."""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"\n[{ts}] Unhandled Exception:\n{msg}\n")
+        print(f"[LyricNow Error] {msg}")
+    except Exception:
+        pass
+
+
+sys.excepthook = _log_unhandled_exception
+if hasattr(threading, "excepthook"):
+    threading.excepthook = lambda args: _log_unhandled_exception(args.exc_type, args.exc_value, args.exc_traceback)
 
 # Set AppUserModelID on Windows so taskbar displays explicit icon and window identity
 try:
@@ -87,8 +112,8 @@ class LyricOverlayApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
 
-        # Standard window behavior: Quit when main window is closed (No background running)
-        self.app.setQuitOnLastWindowClosed(True)
+        # Explicit lifecycle control: NEVER auto-quit when popups/dialogs close or overlay hides briefly
+        self.app.setQuitOnLastWindowClosed(False)
 
         if os.path.exists(ICO_FILE):
             self.app.setWindowIcon(QIcon(ICO_FILE))
@@ -132,17 +157,27 @@ class LyricOverlayApp:
         # 4. Mandatory Update Gate: check on startup + every 30 minutes
         self._update_enforced = False
         self._update_worker = None
+        self._old_update_workers = []
         self._exiting = False
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.check_for_updates)
         self.update_timer.start(30 * 60 * 1000)
         QTimer.singleShot(350, self.check_for_updates)
 
+    def _cleanup_old_update_worker(self, w):
+        if w in self._old_update_workers and not w.isRunning():
+            self._old_update_workers.remove(w)
+
     def check_for_updates(self):
         if self._update_enforced or self._exiting:
             return
         if self._update_worker and self._update_worker.isRunning():
             return
+        if self._update_worker is not None:
+            old_u = self._update_worker
+            self._update_worker = None
+            self._old_update_workers.append(old_u)
+            QTimer.singleShot(600, lambda w=old_u: self._cleanup_old_update_worker(w))
         self._update_worker = UpdateCheckWorker(APP_VERSION, timeout=5.0)
         self._update_worker.update_required.connect(self.on_mandatory_update_required)
         self._update_worker.start()
@@ -154,7 +189,7 @@ class LyricOverlayApp:
         if hasattr(self, "update_timer") and self.update_timer:
             self.update_timer.stop()
 
-        # Immediately block & hide the outdated app so it cannot be used without updating!
+        # Pause old app playback and show mandatory dialog BEFORE hiding overlay
         try:
             if hasattr(self.overlay, "sync_timer") and self.overlay.sync_timer:
                 self.overlay.sync_timer.stop()
@@ -162,11 +197,14 @@ class LyricOverlayApp:
                 self.overlay.vol_sync_timer.stop()
             if hasattr(self.overlay, "video_display") and self.overlay.video_display:
                 self.overlay.video_display.stop_video(clear_artwork=True)
-            self.overlay.hide()
         except Exception:
             pass
 
         dlg = MandatoryUpdateDialog(APP_VERSION, release_info, app_lang=self.settings.get("app_lang", "vi"))
+        try:
+            self.overlay.hide()
+        except Exception:
+            pass
         dlg.exec()
         # Regardless of whether auto-update started or user closed dialog, exit old version!
         self.exit_app()

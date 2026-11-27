@@ -245,6 +245,16 @@ class AudioOutputPopup(QWidget):
             self.move(self._target_x, self._target_y)
             self.setWindowOpacity(1.0)
 
+    def hideEvent(self, event):
+        if hasattr(self, "_anim_timer") and self._anim_timer:
+            self._anim_timer.stop()
+        super().hideEvent(event)
+
+    def closeEvent(self, event):
+        if hasattr(self, "_anim_timer") and self._anim_timer:
+            self._anim_timer.stop()
+        super().closeEvent(event)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)

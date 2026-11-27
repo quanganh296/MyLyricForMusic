@@ -4,7 +4,7 @@ import time
 import requests
 from modules.qt_compat import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGraphicsDropShadowEffect, QFrame, Qt, QPoint, QTimer, Signal,
+    QGraphicsDropShadowEffect, QFrame, Qt, QPoint, QTimer, Signal, QThread,
     QColor, QFont, QFontMetrics, QCursor, QSizeGrip, QSlider, QIcon,
     QPainter, QPainterPath, QPen, QPixmap, QRectF, QRect, QSize, QSizePolicy
 )
@@ -367,6 +367,35 @@ class ToolbarIconButton(QPushButton):
         super().mouseReleaseEvent(event)
 
 
+class LyricFetchWorker(QThread):
+    """Non-blocking background worker for lyrics_provider.fetch_lyrics() so GUI NEVER freezes on track switches."""
+    fetched = Signal(int, str, str, float, bool, object)  # track_gen, title, artist, duration, is_recheck, lyrics_data
+
+    def __init__(self, provider, track_gen: int, title: str, artist: str, duration: float, is_recheck: bool = False):
+        super().__init__()
+        self.provider = provider
+        self.track_gen = track_gen
+        self.title = title
+        self.artist = artist
+        self.duration = float(duration or 0.0)
+        self.is_recheck = is_recheck
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        if self._cancelled or not self.provider:
+            return
+        data = None
+        try:
+            data = self.provider.fetch_lyrics(self.title, self.artist, duration=self.duration)
+        except Exception as e:
+            print(f"[LyricFetchWorker Error] {e}")
+        if not self._cancelled:
+            self.fetched.emit(self.track_gen, self.title, self.artist, self.duration, self.is_recheck, data)
+
+
 class LyricOverlayWindow(QWidget):
     request_settings = Signal()
     request_search = Signal()
@@ -418,6 +447,9 @@ class LyricOverlayWindow(QWidget):
         self.translation_worker = None
         self._old_trans_workers = []
         self.current_trans_req_key = None
+        self.lyric_fetch_worker = None
+        self._old_fetch_workers = []
+        self._active_track_identity = None
 
         self.setup_window_flags()
         self.setup_ui()
@@ -455,6 +487,14 @@ class LyricOverlayWindow(QWidget):
             self.sync_timer.stop()
         if hasattr(self, "vol_sync_timer") and self.vol_sync_timer:
             self.vol_sync_timer.stop()
+        if self.lyric_fetch_worker:
+            self.lyric_fetch_worker.cancel()
+            self.lyric_fetch_worker.wait(300)
+            self.lyric_fetch_worker = None
+        for fw in list(self._old_fetch_workers):
+            fw.cancel()
+            fw.wait(150)
+        self._old_fetch_workers.clear()
         if self.translation_worker:
             self.translation_worker.cancel()
             self.translation_worker.wait(400)
@@ -1691,6 +1731,8 @@ class LyricOverlayWindow(QWidget):
             if trans_enabled:
                 self._trigger_translation_if_needed()
             self._update_active_translation_label(self._effective_display_index())
+            if self.current_media_state:
+                self.update_lyric_display()
         else:
             self._fit_active_lyric_fonts()
 
@@ -1898,7 +1940,17 @@ class LyricOverlayWindow(QWidget):
 
     def _cleanup_old_trans_worker(self, worker):
         if worker in self._old_trans_workers:
+            if worker.isRunning():
+                QTimer.singleShot(600, lambda w=worker: self._cleanup_old_trans_worker(w))
+                return
             self._old_trans_workers.remove(worker)
+
+    def _cleanup_old_fetch_worker(self, worker):
+        if worker in self._old_fetch_workers:
+            if worker.isRunning():
+                QTimer.singleShot(600, lambda w=worker: self._cleanup_old_fetch_worker(w))
+                return
+            self._old_fetch_workers.remove(worker)
 
     def _trigger_translation_if_needed(self):
         if not self.settings.get("enable_translation", True):
@@ -1931,18 +1983,43 @@ class LyricOverlayWindow(QWidget):
             self.translation_worker = None
             old_w.cancel()
             try:
+                old_w.partial_translated.disconnect(self._on_translation_partial)
+            except Exception:
+                pass
+            try:
                 old_w.translated.disconnect(self._on_translation_ready)
             except Exception:
                 pass
+            # Always keep reference safely until well after Qt C++ thread teardown!
+            self._old_trans_workers.append(old_w)
             if old_w.isRunning():
-                self._old_trans_workers.append(old_w)
-                old_w.finished.connect(lambda w=old_w: self._cleanup_old_trans_worker(w))
+                old_w.finished.connect(lambda w=old_w: QTimer.singleShot(600, lambda ww=w: self._cleanup_old_trans_worker(ww)))
+            else:
+                QTimer.singleShot(600, lambda w=old_w: self._cleanup_old_trans_worker(w))
 
         self.current_trans_req_key = req_key
-        worker = TranslationWorker(req_key, lines, target_lang)
+        start_idx = max(0, self._effective_display_index())
+        worker = TranslationWorker(req_key, lines, target_lang, start_idx=start_idx)
+        worker.partial_translated.connect(self._on_translation_partial)
         worker.translated.connect(self._on_translation_ready)
         self.translation_worker = worker
         worker.start()
+
+    def _on_translation_partial(
+        self, req_key: str, target_lang: str, trans_list: list, romaji_list: list, detected_lang: str
+    ):
+        """Applies progressive translation batches immediately (<0.5s) as they stream in!"""
+        if req_key != self.current_trans_req_key or not self.current_lyrics:
+            return
+        lines = self.current_lyrics.get("lines") or []
+        if len(trans_list) != len(lines):
+            return
+        self.current_lyrics.setdefault("translations", {})[target_lang] = trans_list
+        if isinstance(romaji_list, list) and len(romaji_list) == len(lines):
+            self.current_lyrics["romanizations"] = romaji_list
+        if detected_lang:
+            self.current_lyrics["detected_lang"] = detected_lang
+        self._update_active_translation_label(self._effective_display_index())
 
     def _on_translation_ready(
         self, req_key: str, target_lang: str, trans_list: list, romaji_list: list, detected_lang: str
@@ -1959,7 +2036,7 @@ class LyricOverlayWindow(QWidget):
         if detected_lang:
             self.current_lyrics["detected_lang"] = detected_lang
 
-        # Persist translation & romanization in local cache for instant reuse next playback
+        # Persist translation & romanization under BOTH raw title and clean title for instant cache hits
         try:
             if self.lyrics_provider and self.lyrics_provider.cache:
                 title_for_cache = self.current_lyrics.get("req_title") or self.current_lyrics.get("title") or ""
@@ -1969,17 +2046,96 @@ class LyricOverlayWindow(QWidget):
                 elif self.current_lyrics.get("artist"):
                     artist_for_cache = self.current_lyrics.get("artist", "").strip()
                 if title_for_cache:
+                    self.lyrics_provider.cache.set(title_for_cache, artist_for_cache, self.current_lyrics)
                     clean_t = self.lyrics_provider.clean_title(title_for_cache)
-                    self.lyrics_provider.cache.set(clean_t, artist_for_cache, self.current_lyrics)
+                    has_ver = hasattr(self.lyrics_provider, "_extract_version_tags") and bool(self.lyrics_provider._extract_version_tags(title_for_cache))
+                    if clean_t and clean_t != title_for_cache and not has_ver:
+                        self.lyrics_provider.cache.set(clean_t, artist_for_cache, self.current_lyrics)
         except Exception:
             pass
 
         self._update_active_translation_label(self._effective_display_index())
 
+    def _start_async_lyric_fetch(self, track_gen: int, title: str, artist: str, duration: float, is_recheck: bool = False):
+        """Launches non-blocking background lyric lookup so UI & video stay 60 FPS with zero freeze."""
+        if self.lyric_fetch_worker:
+            old_fw = self.lyric_fetch_worker
+            self.lyric_fetch_worker = None
+            old_fw.cancel()
+            try:
+                old_fw.fetched.disconnect(self._on_lyrics_fetched)
+            except Exception:
+                pass
+            self._old_fetch_workers.append(old_fw)
+            if old_fw.isRunning():
+                old_fw.finished.connect(lambda w=old_fw: QTimer.singleShot(600, lambda ww=w: self._cleanup_old_fetch_worker(ww)))
+            else:
+                QTimer.singleShot(600, lambda w=old_fw: self._cleanup_old_fetch_worker(w))
+
+        fw = LyricFetchWorker(self.lyrics_provider, track_gen, title, artist, duration, is_recheck=is_recheck)
+        fw.fetched.connect(self._on_lyrics_fetched)
+        self.lyric_fetch_worker = fw
+        fw.start()
+
+    @staticmethod
+    def _sanitize_sync_offset(val) -> float:
+        try:
+            off = float(val or 0.0)
+        except Exception:
+            return 0.0
+        # Guard against corrupted huge negative offsets (e.g. -120s) that freeze lyrics until song ends!
+        if off < -45.0 or off > 75.0:
+            return 0.0
+        return off
+
+    def _on_lyrics_fetched(self, gen: int, req_title: str, req_artist: str, req_dur: float, is_recheck: bool, lyrics_data):
+        if gen != self._track_gen:
+            return
+        if is_recheck:
+            if not lyrics_data or not lyrics_data.get("lines"):
+                return
+            if self.current_lyrics:
+                cur_src = str(self.current_lyrics.get("source") or "")
+                if ("Manual" in cur_src) or ("Custom" in cur_src):
+                    return
+
+        if lyrics_data and lyrics_data.get("lines"):
+            lyrics_data["req_title"] = req_title
+            lyrics_data["req_artist"] = req_artist
+            self.current_lyrics = lyrics_data
+            if lyrics_data.get("video_id"):
+                self.current_video_id = lyrics_data.get("video_id")
+                self._trigger_track_media_load()
+            self.settings["sync_offset"] = self._sanitize_sync_offset(lyrics_data.get("sync_offset"))
+        elif not is_recheck:
+            self.settings["sync_offset"] = 0.0
+            self.current_lyrics = {
+                "req_title": req_title,
+                "req_artist": req_artist,
+                "synced": False,
+                "lines": [{"time": 0.0, "text": tr(self._lang(), "no_lyrics_found")}]
+            }
+
+        self.current_line_index = -99
+        self.lbl_active_romaji.setText("")
+        self.lbl_active_romaji.setVisible(False)
+        self.lbl_active_trans.setText("")
+        self.lbl_active_trans.setVisible(False)
+
+        # Snap immediately to exact live playback timestamp BEFORE kicking off priority translation!
+        self.update_lyric_display()
+        self._trigger_translation_if_needed()
+
     # ---------------------------------------------------------
     # Media & Lyrics Sync
     # ---------------------------------------------------------
     def on_media_updated(self, media_state):
+        try:
+            self._handle_media_updated(media_state)
+        except Exception as e:
+            print(f"[Overlay MediaUpdate Error] {e}")
+
+    def _handle_media_updated(self, media_state):
         self.current_media_state = media_state
         if not media_state or not media_state.title:
             lang = self._lang()
@@ -1997,6 +2153,7 @@ class LyricOverlayWindow(QWidget):
             self.lbl_next2.setText("")
             self.current_lyrics = None
             self.current_video_id = None
+            self._active_track_identity = None
             self._track_gen += 1
             self._prev_track_gsmtc_bytes = None
             self._last_gsmtc_thumb_bytes = None
@@ -2014,68 +2171,59 @@ class LyricOverlayWindow(QWidget):
         info_text = f"{new_title} - {new_artist}" if new_artist else new_title
         self.lbl_song_info.setText(info_text)
 
-        prev_req_title = self.current_lyrics.get("req_title") if self.current_lyrics else None
-        prev_req_artist = self.current_lyrics.get("req_artist", "") if self.current_lyrics else ""
+        prev_id = self._active_track_identity
+        prev_req_title = prev_id[0] if prev_id else (self.current_lyrics.get("req_title") if self.current_lyrics else None)
+        prev_req_artist = prev_id[1] if prev_id else (self.current_lyrics.get("req_artist", "") if self.current_lyrics else "")
         song_changed = (
-            not self.current_lyrics
+            prev_req_title is None
             or prev_req_title != new_title
             or (bool(prev_req_artist) and bool(new_artist) and prev_req_artist != new_artist)
         )
 
         if song_changed:
-            print(f"[Overlay] Fetching lyrics for: {new_title} - {new_artist}")
+            print(f"[Overlay] Fetching lyrics async for: {new_title} - {new_artist}")
 
-            # Reset previous track's artwork immediately so old background or Chrome transition logo never sticks
+            # Reset previous track state immediately so UI never freezes or shows stale lyrics/artwork
             self._track_gen += 1
+            self._active_track_identity = (new_title, new_artist)
             self._prev_track_gsmtc_bytes = self._last_gsmtc_thumb_bytes
             self._last_gsmtc_thumb_bytes = None
             self.current_video_id = None
+            self.current_lyrics = None
+            self.current_line_index = -99
+            self.settings["sync_offset"] = 0.0
             self._reset_track_artwork(clear_display=True)
 
-            # Apply GSMTC thumbnail only if genuinely fresh and not a Chrome/Google logo
-            self._maybe_apply_gsmtc_thumbnail(media_state.thumbnail_bytes)
-
-            # Start fetching the real YouTube HD artwork (and video stream in Mode 1) in parallel with lyrics
-            self._trigger_track_media_load()
-
-            self.current_line_index = -99
-            track_dur = float(getattr(media_state, "duration", 0.0) or 0.0)
-            lyrics_data = self.lyrics_provider.fetch_lyrics(new_title, new_artist, duration=track_dur)
-            if lyrics_data:
-                lyrics_data["req_title"] = new_title
-                lyrics_data["req_artist"] = new_artist
-                self.current_lyrics = lyrics_data
-                self.current_video_id = lyrics_data.get("video_id")
-                self.settings["sync_offset"] = lyrics_data.get("sync_offset", 0.0)
-            else:
-                self.settings["sync_offset"] = 0.0
-                self.current_lyrics = {
-                    "req_title": new_title,
-                    "req_artist": new_artist,
-                    "synced": False,
-                    "lines": [{"time": 0.0, "text": tr(self._lang(), "no_lyrics_found")}]
-                }
-
-            # If cached lyrics carried an explicit YouTube video_id, align artwork/video to that exact video
-            if self.current_video_id:
-                self._trigger_track_media_load()
-
-            # Trigger async background auto-detection, romanization & translation
+            # Clear old song lyrics cleanly while background fetch runs (<0.5s)
+            loading_txt = tr(self._lang(), "fetching_lyrics")
+            self.lbl_prev2.setText("")
+            self.lbl_prev.setText("")
+            self.lbl_active.setText(loading_txt)
+            if hasattr(self, "karaoke_widget"):
+                self.karaoke_widget.set_static_text(loading_txt)
             self.lbl_active_romaji.setText("")
             self.lbl_active_romaji.setVisible(False)
             self.lbl_active_trans.setText("")
             self.lbl_active_trans.setVisible(False)
-            self._trigger_translation_if_needed()
+            self.lbl_next.setText("")
+            self.lbl_next2.setText("")
 
-            # Snap immediately to the exact current playback line (including mid-song launches & auto-offset!)
+            # Apply GSMTC thumbnail only if genuinely fresh and not a Chrome/Google logo
+            self._maybe_apply_gsmtc_thumbnail(media_state.thumbnail_bytes)
+
+            # Start fetching YouTube HD artwork/video AND lyrics in parallel background threads!
+            self._trigger_track_media_load()
+
+            track_dur = float(getattr(media_state, "duration", 0.0) or 0.0)
             self._dur_recheck_key = (new_title, int(round(track_dur / 5.0))) if track_dur > 30.0 else None
-            self.update_lyric_display()
+            self._start_async_lyric_fetch(self._track_gen, new_title, new_artist, track_dur, is_recheck=False)
         else:
-            if self.current_lyrics and not prev_req_artist and new_artist:
-                self.current_lyrics["req_artist"] = new_artist
+            if not prev_req_artist and new_artist:
+                self._active_track_identity = (new_title, new_artist)
+                if self.current_lyrics:
+                    self.current_lyrics["req_artist"] = new_artist
 
-            # Handle Chrome delayed duration update (Tick 0 reported duration=0 or previous video's duration,
-            # then 1s later Chrome reports real Official MV duration like 248.2s -> upgrade to exact MV-synced LRC!)
+            # Handle Chrome delayed duration update asynchronously (zero GUI freeze!)
             cur_dur = float(getattr(media_state, "duration", 0.0) or 0.0)
             if self.current_lyrics and cur_dur > 30.0:
                 src_str = str(self.current_lyrics.get("source") or "")
@@ -2085,20 +2233,8 @@ class LyricOverlayWindow(QWidget):
                     fetched_dur = float(self.current_lyrics.get("track_duration") or 0.0)
                     if fetched_dur <= 30.0 or abs(fetched_dur - cur_dur) > 10.0:
                         self._dur_recheck_key = recheck_key
-                        print(f"[Overlay] Re-aligning lyrics to real video duration ({cur_dur:.1f}s) for: {new_title}")
-                        better = self.lyrics_provider.fetch_lyrics(new_title, new_artist, duration=cur_dur)
-                        if better and better.get("lines"):
-                            better["req_title"] = new_title
-                            better["req_artist"] = new_artist
-                            self.current_lyrics = better
-                            self.current_line_index = -99
-                            self.settings["sync_offset"] = float(better.get("sync_offset", 0.0) or 0.0)
-                            self.lbl_active_romaji.setText("")
-                            self.lbl_active_romaji.setVisible(False)
-                            self.lbl_active_trans.setText("")
-                            self.lbl_active_trans.setVisible(False)
-                            self.update_lyric_display()
-                            self._trigger_translation_if_needed()
+                        print(f"[Overlay] Re-aligning lyrics async to real video duration ({cur_dur:.1f}s) for: {new_title}")
+                        self._start_async_lyric_fetch(self._track_gen, new_title, new_artist, cur_dur, is_recheck=True)
 
             # Only consider GSMTC thumbnail while no higher-priority YouTube video artwork is loaded
             self._maybe_apply_gsmtc_thumbnail(media_state.thumbnail_bytes)
@@ -2213,6 +2349,12 @@ class LyricOverlayWindow(QWidget):
             self.lbl_next2.setText(lines[idx + 2]["text"] if idx + 2 < len(lines) else "")
 
     def update_lyric_display(self):
+        try:
+            self._update_lyric_display_inner()
+        except Exception as e:
+            print(f"[Overlay Sync Error] {e}")
+
+    def _update_lyric_display_inner(self):
         if not self.current_media_state:
             return
 
@@ -2241,7 +2383,7 @@ class LyricOverlayWindow(QWidget):
             self.lbl_next2.setText("")
             return
 
-        current_time = self.current_media_state.get_current_position() + self.settings.get("sync_offset", 0.0)
+        current_time = self.current_media_state.get_current_position() + float(self.settings.get("sync_offset") or 0.0)
 
         active_idx = -1
         for i, line in enumerate(lines):
@@ -2311,19 +2453,22 @@ class LyricOverlayWindow(QWidget):
         target_time = lines[target_idx]["time"]
         if self.current_media_state:
             raw_pos = self.current_media_state.get_current_position()
-            needed_offset = target_time - raw_pos
-            self.settings["sync_offset"] = round(needed_offset, 2)
+            needed_offset = max(-45.0, min(75.0, round(target_time - raw_pos, 2)))
+            self.settings["sync_offset"] = needed_offset
 
             if self.current_lyrics:
-                self.current_lyrics["sync_offset"] = round(needed_offset, 2)
-                clean_t = self.lyrics_provider.clean_title(self.current_media_state.title)
+                self.current_lyrics["sync_offset"] = needed_offset
+                raw_t = self.current_media_state.title.strip()
+                clean_t = self.lyrics_provider.clean_title(raw_t)
                 clean_a = self.current_media_state.artist.strip()
                 if self.lyrics_provider.cache:
-                    self.lyrics_provider.cache.set(clean_t, clean_a, self.current_lyrics)
+                    self.lyrics_provider.cache.set(raw_t, clean_a, self.current_lyrics)
+                    if clean_t and clean_t != raw_t:
+                        self.lyrics_provider.cache.set(clean_t, clean_a, self.current_lyrics)
 
             info_prefix = f"{self.current_media_state.title} - {self.current_media_state.artist}"
             self.lbl_song_info.setText(
-                f"{info_prefix}  (Đã lưu đồng bộ câu {target_idx + 1}: {needed_offset:+.1f}s)"
+                f"{info_prefix}  ({tr(self._lang(), 'sync_saved', idx=target_idx + 1, off=needed_offset)})"
             )
 
         self.current_line_index = target_idx

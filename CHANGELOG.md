@@ -1,5 +1,10 @@
 # Lịch sử cập nhật LyricNow
 
+## v1.1.5
+- **Sửa triệt để lỗi ứng dụng tự thoát đột ngột sau một thời gian chạy:** Tắt chế độ tự thoát ngầm khi đóng popup/hộp thoại (`setQuitOnLastWindowClosed(False)`), khắc phục race condition hủy `QThread` khi chuyển bài/tải video/dịch lời, dừng sạch animation khi đóng bảng chọn loa, và bổ sung lớp bảo vệ lỗi toàn cục (`lyricnow_error.log`) giúp app chạy bền bỉ không bị văng bất ngờ.
+- **Tải lời & dịch lời siêu tốc không còn đứng hình hay delay tới cuối bài:** Chuyển toàn bộ quá trình tìm lời bài hát sang luồng nền (`LyricFetchWorker`) để giao diện luôn mượt 60 FPS; nâng cấp bộ dịch truyền phát từng đoạn (`partial_translated`) ưu tiên dịch ngay câu đang hát trước (< 0.5 giây) kèm xử lý song song và giữ kết nối HTTP Keep-Alive.
+- **Bảo vệ độ lệch thời gian (`sync_offset`) khi đổi ngôn ngữ / mở Cài đặt:** Mở rộng dải offset trong Cài đặt (`-120s` đến `+120s`), không ghi đè mất độ lệch của bài hát đang nghe khi chỉ đổi ngôn ngữ ứng dụng hoặc ngôn ngữ dịch, và chặn lưu các giá trị offset lệch quá đà vào cache.
+
 ## v1.1.4
 - **Chuyển nhanh thiết bị phát âm thanh (Loa máy tính / Tai nghe Bluetooth) bằng menu trượt lên:** Nhấn trực tiếp vào thanh pin tai nghe ở góc dưới bên trái để trượt lên danh sách toàn bộ loa/tai nghe đang hoạt động trên Windows, cho phép chuyển đổi tức thì giữa loa Bluetooth và loa hệ thống máy tính mà không cần bật/tắt Bluetooth; thanh âm lượng cũng tự động đồng bộ ngay theo thiết bị vừa chọn.
 

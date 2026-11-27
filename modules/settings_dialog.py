@@ -215,11 +215,13 @@ class SettingsDialog(QDialog):
         form_sync.setSpacing(12)
 
         offset_layout = QHBoxLayout()
+        self._offset_user_edited = False
         self.spin_offset = QDoubleSpinBox()
-        self.spin_offset.setRange(-10.0, 10.0)
+        self.spin_offset.setRange(-120.0, 120.0)
         self.spin_offset.setSingleStep(0.1)
         self.spin_offset.setSuffix(tr(self.app_lang, "sec_suffix"))
-        self.spin_offset.setValue(self.settings.get("sync_offset", 0.0))
+        self.spin_offset.setValue(float(self.settings.get("sync_offset") or 0.0))
+        self.spin_offset.valueChanged.connect(lambda _v: setattr(self, "_offset_user_edited", True))
         offset_layout.addWidget(self.spin_offset)
 
         for off_val, off_lbl in [(-1.0, "-1.0s"), (-0.5, "-0.5s"), (0.0, "0.0s"), (0.5, "+0.5s"), (1.0, "+1.0s")]:
@@ -549,7 +551,8 @@ class SettingsDialog(QDialog):
         self.settings["display_mode"] = self.combo_mode.currentIndex() + 1
         self.settings["line_mode"] = self.combo_lines.currentIndex()
         self.settings["align_mode"] = self.combo_align.currentIndex()
-        self.settings["sync_offset"] = self.spin_offset.value()
+        if getattr(self, "_offset_user_edited", False):
+            self.settings["sync_offset"] = self.spin_offset.value()
         self.settings["app_lang"] = self.combo_app_lang.currentData() or "vi"
         self.settings["enable_translation"] = (self.combo_translate_enable.currentIndex() == 0)
         self.settings["enable_romanization"] = (self.combo_romaji_enable.currentIndex() == 0)

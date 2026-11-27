@@ -268,6 +268,10 @@ class RoundedVideoDisplay(QWidget):
 
     def _cleanup_old_resolver(self, resolver):
         if resolver in self._old_resolvers:
+            if resolver.isRunning():
+                from modules.qt_compat import QTimer
+                QTimer.singleShot(600, lambda r=resolver: self._cleanup_old_resolver(r))
+                return
             self._old_resolvers.remove(resolver)
 
     def set_border_color(self, rgba_str_or_qcolor):
@@ -475,14 +479,19 @@ class RoundedVideoDisplay(QWidget):
             self.resolver = None
             old_r.cancel()
             try:
+                old_r.video_id_found.disconnect()
                 old_r.artwork_fetched.disconnect()
                 old_r.resolved.disconnect()
                 old_r.failed.disconnect()
             except Exception:
                 pass
+            # Always keep a reference until well after QThread teardown to prevent PyQt6 QThread GC abort!
+            self._old_resolvers.append(old_r)
+            from modules.qt_compat import QTimer
             if old_r.isRunning():
-                self._old_resolvers.append(old_r)
-                old_r.finished.connect(lambda r=old_r: self._cleanup_old_resolver(r))
+                old_r.finished.connect(lambda r=old_r: QTimer.singleShot(600, lambda rr=r: self._cleanup_old_resolver(rr)))
+            else:
+                QTimer.singleShot(600, lambda r=old_r: self._cleanup_old_resolver(r))
 
         if self.player:
             self.player.stop()

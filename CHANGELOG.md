@@ -1,5 +1,12 @@
 # Lịch sử cập nhật LyricNow
 
+## v1.1.6
+- **Kiểm tra cập nhật trực tiếp mỗi 60 giây khi app đang chạy:** Dùng cơ chế kiểm tra chuyển hướng nhẹ không bị giới hạn GitHub API; ngay khi bản phát hành mới sẵn sàng, ứng dụng đang mở sẽ lập tức đóng cửa sổ cũ (kể cả hộp thoại phụ) và bật ngay bảng yêu cầu cập nhật lên trên cùng.
+- **Giảm tối đa báo nhầm của Windows Defender / Antivirus:**
+  - Tắt nén **UPX** (`upx=False`) trong `LyricNow.spec` (nguyên nhân chính gây báo nhầm nhận diện heuristic trên file đóng gói PyInstaller).
+  - Nhúng đầy đủ thông tin tệp Windows PE (`version_info.txt`: tên sản phẩm, mô tả, phiên bản) và Manifest `asInvoker` chuẩn Windows 10/11 (`LyricNow.manifest`).
+  - Thay cơ chế tự cập nhật bằng tệp `.bat` ẩn / `cmd.exe` sang cơ chế đổi tên trực tiếp nguyên bản của Windows NTFS (`LyricNow.exe` -> `LyricNow.exe.old`) và tự dọn tệp cũ ở lần chạy tiếp theo, kèm mã kiểm tra toàn vẹn `SHA256SUMS.txt` trên GitHub Release.
+
 ## v1.1.5
 - **Sửa triệt để lỗi ứng dụng tự thoát đột ngột sau một thời gian chạy:** Tắt chế độ tự thoát ngầm khi đóng popup/hộp thoại (`setQuitOnLastWindowClosed(False)`), khắc phục race condition hủy `QThread` khi chuyển bài/tải video/dịch lời, dừng sạch animation khi đóng bảng chọn loa, và bổ sung lớp bảo vệ lỗi toàn cục (`lyricnow_error.log`) giúp app chạy bền bỉ không bị văng bất ngờ.
 - **Tải lời & dịch lời siêu tốc không còn đứng hình hay delay tới cuối bài:** Chuyển toàn bộ quá trình tìm lời bài hát sang luồng nền (`LyricFetchWorker`) để giao diện luôn mượt 60 FPS; nâng cấp bộ dịch truyền phát từng đoạn (`partial_translated`) ưu tiên dịch ngay câu đang hát trước (< 0.5 giây) kèm xử lý song song và giữ kết nối HTTP Keep-Alive.

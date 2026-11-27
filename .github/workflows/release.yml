@@ -45,19 +45,38 @@ jobs:
           }
           echo "tag=$tag" >> $env:GITHUB_OUTPUT
 
-      - name: Sync app version with release tag
+      - name: Sync app version & Windows PE metadata with release tag
         shell: pwsh
         run: |
           $tag = "${{ steps.meta.outputs.tag }}"
           if ($tag) {
             Set-Content -Path "modules/version.py" -Value "APP_VERSION = `"$tag`"" -Encoding UTF8
+            $nums = ($tag -replace '^v', '') -split '\.'
+            $v1 = if ($nums.Count -ge 1) { [int]$nums[0] } else { 1 }
+            $v2 = if ($nums.Count -ge 2) { [int]$nums[1] } else { 0 }
+            $v3 = if ($nums.Count -ge 3) { [int]$nums[2] } else { 0 }
+            $verTuple = "($v1, $v2, $v3, 0)"
+            $verDot = "$v1.$v2.$v3.0"
+            if (Test-Path "version_info.txt") {
+              $vi = Get-Content "version_info.txt" -Raw -Encoding UTF8
+              $vi = $vi -replace 'filevers=\([^\)]+\)', "filevers=$verTuple"
+              $vi = $vi -replace 'prodvers=\([^\)]+\)', "prodvers=$verTuple"
+              $vi = $vi -replace "StringStruct\('FileVersion', '[^']+'\)", "StringStruct('FileVersion', '$verDot')"
+              $vi = $vi -replace "StringStruct\('ProductVersion', '[^']+'\)", "StringStruct('ProductVersion', '$verDot')"
+              Set-Content -Path "version_info.txt" -Value $vi -Encoding UTF8
+            }
+            if (Test-Path "LyricNow.manifest") {
+              $mf = Get-Content "LyricNow.manifest" -Raw -Encoding UTF8
+              $mf = $mf -replace 'version="[0-9\.]+"', "version=`"$verDot`""
+              Set-Content -Path "LyricNow.manifest" -Value $mf -Encoding UTF8
+            }
           }
 
       - name: Build LyricNow.exe with PyInstaller
         run: |
           pyinstaller LyricNow.spec --noconfirm
 
-      - name: Verify executable exists
+      - name: Verify executable & compute SHA-256 checksum
         shell: pwsh
         run: |
           if (!(Test-Path "dist/LyricNow.exe")) {
@@ -65,6 +84,9 @@ jobs:
             exit 1
           }
           Get-Item "dist/LyricNow.exe" | Select-Object Name, Length
+          $hash = (Get-FileHash "dist/LyricNow.exe" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "dist/SHA256SUMS.txt" -Value "$hash  LyricNow.exe" -Encoding UTF8
+          Get-Content "dist/SHA256SUMS.txt"
 
       - name: Generate release notes for tag
         shell: pwsh
@@ -122,6 +144,8 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: "LyricNow ${{ steps.meta.outputs.tag }} (Windows)"
           body_path: release_body.md
-          files: dist/LyricNow.exe
+          files: |
+            dist/LyricNow.exe
+            dist/SHA256SUMS.txt
           draft: false
           prerelease: false

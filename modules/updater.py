@@ -36,13 +36,76 @@ def is_newer_version(latest: str, current: str) -> bool:
     return tuple(a) > tuple(b)
 
 
-def fetch_latest_release(timeout: float = 5.0):
+def cleanup_old_update_artifacts(base_dir: str = None):
+    """Silently deletes leftover .old executable or temporary staged files from a previous update."""
+    try:
+        folder = base_dir or (os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False) else "")
+        if not folder or not os.path.isdir(folder):
+            return
+        targets = {"lyricnow.exe.old", "lyricnow_update.exe", "_lyricnow_updater.bat"}
+        for fname in os.listdir(folder):
+            low = fname.lower()
+            if low in targets or low.startswith("lyricnow.exe.old"):
+                fp = os.path.join(folder, fname)
+                if os.path.isfile(fp):
+                    try:
+                        os.remove(fp)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+def fetch_latest_tag_fast(timeout: float = 4.5) -> tuple:
+    """
+    Rate-limit-free lightweight check (~150ms) via GitHub's /releases/latest redirect.
+    Safe to poll every 60 seconds all day without touching the 60 req/hr REST API quota!
+    Returns (tag_str, release_url) or (None, None).
+    """
+    try:
+        resp = requests.head(
+            GITHUB_WEB_LATEST,
+            headers={"User-Agent": "LyricNow-Updater/1.0"},
+            timeout=timeout,
+            allow_redirects=True,
+        )
+        m = _TAG_URL_RE.search(resp.url or "")
+        if m:
+            return m.group(1), resp.url
+        # Fallback to GET if proxy/CDN doesn't follow HEAD redirects
+        resp = requests.get(
+            GITHUB_WEB_LATEST,
+            headers={"User-Agent": "LyricNow-Updater/1.0"},
+            timeout=timeout,
+            allow_redirects=True,
+            stream=True,
+        )
+        final_url = resp.url or ""
+        resp.close()
+        m = _TAG_URL_RE.search(final_url)
+        if m:
+            return m.group(1), final_url
+    except Exception:
+        pass
+    return None, None
+
+
+def fetch_latest_release(timeout: float = 5.0, current_version: str = None, require_asset_ready: bool = False):
     """
     Fetches the latest GitHub release metadata for LyricNow.
-    Tries GitHub REST API first (gets exact changelog notes & .exe asset URL),
-    then falls back to the rate-limit-free /releases/latest redirect URL.
-    Returns dict or None when offline/unreachable.
+    When current_version is supplied, uses the rate-limit-free redirect check FIRST and only
+    queries GitHub REST API once a genuinely newer release exists!
     """
+    fast_tag, fast_url = fetch_latest_tag_fast(timeout=min(4.5, timeout))
+    if current_version and fast_tag and not is_newer_version(fast_tag, current_version):
+        return {
+            "version": fast_tag,
+            "release_url": fast_url or GITHUB_WEB_LATEST,
+            "download_url": "",
+            "download_size": 0,
+            "notes": "",
+        }
+
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "LyricNow-Updater/1.0",
@@ -63,6 +126,8 @@ def fetch_latest_release(timeout: float = 5.0):
                         dl_url = (asset.get("browser_download_url") or "").strip()
                         dl_size = int(asset.get("size") or 0)
                         break
+                if require_asset_ready and not dl_url:
+                    return None
                 return {
                     "version": tag,
                     "release_url": html_url,
@@ -73,42 +138,43 @@ def fetch_latest_release(timeout: float = 5.0):
     except Exception:
         pass
 
-    # Fallback (immune to GitHub REST API 60/hr unauthenticated IP rate limit)
-    try:
-        resp = requests.get(
-            GITHUB_WEB_LATEST,
-            headers={"User-Agent": "LyricNow-Updater/1.0"},
-            timeout=timeout,
-            allow_redirects=True,
-        )
-        m = _TAG_URL_RE.search(resp.url or "")
-        if m:
-            tag = m.group(1)
-            return {
-                "version": tag,
-                "release_url": resp.url,
-                "download_url": f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/LyricNow.exe",
-                "download_size": 0,
-                "notes": "",
-            }
-    except Exception:
-        pass
+    if fast_tag:
+        dl_url = f"https://github.com/{GITHUB_REPO}/releases/download/{fast_tag}/LyricNow.exe"
+        if require_asset_ready:
+            try:
+                chk = requests.head(dl_url, headers={"User-Agent": "LyricNow-Updater/1.0"}, timeout=4, allow_redirects=True)
+                if chk.status_code != 200:
+                    return None
+            except Exception:
+                return None
+        return {
+            "version": fast_tag,
+            "release_url": fast_url or GITHUB_WEB_LATEST,
+            "download_url": dl_url,
+            "download_size": 0,
+            "notes": "",
+        }
 
     return None
 
 
 class UpdateCheckWorker(QThread):
-    """Background worker checking GitHub Releases for mandatory updates."""
+    """Background worker checking GitHub Releases for mandatory updates (rate-limit-free 60s polling)."""
     update_required = Signal(dict)
     check_completed = Signal(bool)
 
-    def __init__(self, current_version: str, timeout: float = 5.0, parent=None):
+    def __init__(self, current_version: str, timeout: float = 5.0, require_asset_ready: bool = True, parent=None):
         super().__init__(parent)
         self.current_version = current_version
         self.timeout = timeout
+        self.require_asset_ready = require_asset_ready
 
     def run(self):
-        info = fetch_latest_release(timeout=self.timeout)
+        info = fetch_latest_release(
+            timeout=self.timeout,
+            current_version=self.current_version,
+            require_asset_ready=self.require_asset_ready,
+        )
         if info and is_newer_version(info.get("version", ""), self.current_version):
             self.update_required.emit(info)
             self.check_completed.emit(True)
@@ -169,36 +235,57 @@ class UpdateDownloadWorker(QThread):
 
 
 def apply_windows_self_update(new_exe_path: str, current_exe_path: str) -> bool:
-    """Spawns a detached hidden batch helper to replace LyricNow.exe after exit and relaunch it."""
+    """
+    Clean native Windows NTFS in-place executable swap WITHOUT cmd.exe or self-deleting .bat files
+    (avoids Windows Defender batch-dropper behavioral false positives!).
+    On Windows, a running .exe can be atomically renamed to .old, replaced with the verified new .exe,
+    and launched directly; the new instance cleans up .old on startup.
+    """
     try:
-        exe_dir = os.path.dirname(os.path.abspath(current_exe_path))
-        bat_path = os.path.join(exe_dir, "_lyricnow_updater.bat")
         cur_p = os.path.abspath(current_exe_path)
         new_p = os.path.abspath(new_exe_path)
-        bat_content = (
-            "@echo off\r\n"
-            "setlocal\r\n"
-            "set \"TRIES=0\"\r\n"
-            ":WAIT_LOOP\r\n"
-            "ping 127.0.0.1 -n 2 > nul\r\n"
-            f"move /Y \"{new_p}\" \"{cur_p}\" > nul 2>&1\r\n"
-            "if errorlevel 1 (\r\n"
-            "  set /a TRIES+=1\r\n"
-            "  if %TRIES% LSS 20 goto WAIT_LOOP\r\n"
-            "  goto DONE\r\n"
-            ")\r\n"
-            f"start \"\" \"{cur_p}\"\r\n"
-            ":DONE\r\n"
-            "del \"%~f0\" > nul 2>&1\r\n"
-        )
-        with open(bat_path, "w", encoding="utf-8") as bf:
-            bf.write(bat_content)
+        old_p = cur_p + ".old"
+        exe_dir = os.path.dirname(cur_p)
 
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-        subprocess.Popen(["cmd.exe", "/c", bat_path], cwd=exe_dir, creationflags=flags)
+        if os.path.exists(old_p):
+            try:
+                os.remove(old_p)
+            except Exception:
+                old_p = cur_p + f".old.{os.getpid()}"
+
+        os.rename(cur_p, old_p)
+        try:
+            os.replace(new_p, cur_p)
+        except Exception:
+            # Rollback cleanly if replace failed
+            if not os.path.exists(cur_p) and os.path.exists(old_p):
+                os.rename(old_p, cur_p)
+            raise
+
+        # Launch freshly swapped LyricNow.exe directly with reset PyInstaller env (no cmd.exe / no .bat!)
+        # Setting PYINSTALLER_RESET_ENVIRONMENT=1 guarantees the new --onefile exe extracts its own _MEI dir cleanly.
+        clean_env = os.environ.copy()
+        for k in list(clean_env.keys()):
+            if k.startswith("_PYI_") or k in ("_MEIPASS2", "PYTHONHOME", "PYTHONPATH"):
+                clean_env.pop(k, None)
+        clean_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        try:
+            subprocess.Popen(
+                [cur_p],
+                cwd=exe_dir,
+                env=clean_env,
+                close_fds=True,
+                creationflags=creation_flags,
+            )
+        except Exception:
+            if hasattr(os, "startfile"):
+                os.startfile(cur_p)
+            else:
+                raise
         return True
     except Exception as e:
-        print(f"[Updater Error] Could not launch self-update helper: {e}")
+        print(f"[Updater Error] Clean self-update swap failed: {e}")
         return False
 
 

@@ -55,7 +55,7 @@ from modules.overlay_window import LyricOverlayWindow
 from modules.settings_dialog import SettingsDialog
 from modules.search_dialog import SearchDialog
 from modules.version import APP_VERSION
-from modules.updater import UpdateCheckWorker, MandatoryUpdateDialog
+from modules.updater import UpdateCheckWorker, MandatoryUpdateDialog, cleanup_old_update_artifacts
 
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
@@ -120,6 +120,10 @@ class LyricOverlayApp:
         elif os.path.exists(ICON_FILE):
             self.app.setWindowIcon(QIcon(ICON_FILE))
 
+        # Clean up any leftover .old executable from a completed native self-update (now + after 3.5s)
+        cleanup_old_update_artifacts(BASE_DIR)
+        QTimer.singleShot(3500, lambda: cleanup_old_update_artifacts(BASE_DIR))
+
         self.settings = load_settings()
         self.cache_manager = LyricsCache(CACHE_DIR)
         self.lyrics_provider = LyricsProvider(self.cache_manager)
@@ -154,14 +158,17 @@ class LyricOverlayApp:
         self.media_thread.start()
         self.bt_thread.start()
 
-        # 4. Mandatory Update Gate: check on startup + every 30 minutes
+        # 4. Mandatory Live Update Gate: check on startup + every 60 seconds while running!
+        # Uses rate-limit-free GitHub redirect pre-check so even an already-running app shuts down
+        # and pops up the mandatory update dialog within <=60s of a new release being published.
         self._update_enforced = False
         self._update_worker = None
         self._old_update_workers = []
+        self._active_modal = None
         self._exiting = False
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.check_for_updates)
-        self.update_timer.start(30 * 60 * 1000)
+        self.update_timer.start(60 * 1000)
         QTimer.singleShot(350, self.check_for_updates)
 
     def _cleanup_old_update_worker(self, w):
@@ -178,7 +185,7 @@ class LyricOverlayApp:
             self._update_worker = None
             self._old_update_workers.append(old_u)
             QTimer.singleShot(600, lambda w=old_u: self._cleanup_old_update_worker(w))
-        self._update_worker = UpdateCheckWorker(APP_VERSION, timeout=5.0)
+        self._update_worker = UpdateCheckWorker(APP_VERSION, timeout=5.0, require_asset_ready=True)
         self._update_worker.update_required.connect(self.on_mandatory_update_required)
         self._update_worker.start()
 
@@ -189,30 +196,50 @@ class LyricOverlayApp:
         if hasattr(self, "update_timer") and self.update_timer:
             self.update_timer.stop()
 
-        # Pause old app playback and show mandatory dialog BEFORE hiding overlay
+        # Immediately shut down running overlay, background media/BT workers & any open child popups/dialogs!
         try:
+            if getattr(self, "media_worker", None):
+                self.media_worker.stop()
+            if getattr(self, "bt_worker", None):
+                self.bt_worker.stop()
+            if self._active_modal is not None:
+                try:
+                    self._active_modal.reject()
+                except Exception:
+                    pass
+                self._active_modal = None
+            if getattr(self.overlay, "_audio_popup", None):
+                try:
+                    self.overlay._audio_popup.close()
+                except Exception:
+                    pass
             if hasattr(self.overlay, "sync_timer") and self.overlay.sync_timer:
                 self.overlay.sync_timer.stop()
             if hasattr(self.overlay, "vol_sync_timer") and self.overlay.vol_sync_timer:
                 self.overlay.vol_sync_timer.stop()
             if hasattr(self.overlay, "video_display") and self.overlay.video_display:
                 self.overlay.video_display.stop_video(clear_artwork=True)
+            self.overlay.hide()
         except Exception:
             pass
 
         dlg = MandatoryUpdateDialog(APP_VERSION, release_info, app_lang=self.settings.get("app_lang", "vi"))
-        try:
-            self.overlay.hide()
-        except Exception:
-            pass
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
         dlg.exec()
-        # Regardless of whether auto-update started or user closed dialog, exit old version!
+        # Regardless of whether auto-update started or user closed dialog, terminate old version!
         self.exit_app()
 
     def open_settings(self):
         dlg = SettingsDialog(self.settings, self.overlay)
         dlg.settings_changed.connect(self.on_settings_updated)
-        dlg.exec()
+        self._active_modal = dlg
+        try:
+            dlg.exec()
+        finally:
+            if self._active_modal is dlg:
+                self._active_modal = None
 
     def on_settings_updated(self, new_settings: dict):
         self.settings = new_settings
@@ -232,7 +259,12 @@ class LyricOverlayApp:
         
         dlg = SearchDialog(self.lyrics_provider, initial_query=current_query, parent=self.overlay)
         dlg.lyric_selected.connect(self.overlay.set_custom_lyrics)
-        dlg.exec()
+        self._active_modal = dlg
+        try:
+            dlg.exec()
+        finally:
+            if self._active_modal is dlg:
+                self._active_modal = None
 
     def exit_app(self):
         if getattr(self, "_exiting", False):

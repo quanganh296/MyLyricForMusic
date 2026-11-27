@@ -13,6 +13,7 @@ from modules.volume_manager import VolumeManager
 from modules.theme_extractor import ThemeExtractor
 from modules.video_player import RoundedVideoDisplay
 from modules.lyrics_translator import TranslationWorker, has_non_latin_script
+from modules.version import APP_VERSION
 
 
 class ThemedGlassFrame(QFrame):
@@ -165,7 +166,7 @@ class LyricOverlayWindow(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMouseTracking(True)
-        self.setWindowTitle("LyricNow - Lời Bài Hát Nổi")
+        self.setWindowTitle(f"LyricNow {APP_VERSION} - Lời Bài Hát Nổi")
 
         res_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         ico_path = os.path.join(res_dir, "assets", "app_icon.ico")
@@ -479,6 +480,19 @@ class LyricOverlayWindow(QWidget):
         bt_pill_layout.addWidget(self.lbl_bt_text)
         self.bt_pill.setVisible(False)
 
+        # App Version Label (Bottom-Left corner)
+        self.lbl_version = QLabel(APP_VERSION)
+        self.lbl_version.setObjectName("VersionLabel")
+        self.lbl_version.setToolTip(f"Phiên bản ứng dụng: LyricNow {APP_VERSION}")
+        self.lbl_version.setStyleSheet(
+            "font-size: 10px; color: rgba(255, 255, 255, 0.58); "
+            "font-weight: 600; font-family: 'Segoe UI', sans-serif; padding: 0 2px 1px 0;"
+        )
+
+        self.bottom_bar.addWidget(
+            self.lbl_version,
+            alignment=Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft
+        )
         self.bottom_bar.addWidget(self.bt_pill)
         self.bottom_bar.addStretch()
         self.bottom_bar.addWidget(self.btn_prev)
@@ -1729,6 +1743,7 @@ class LyricOverlayWindow(QWidget):
             return
         self.is_compact = not self.is_compact
         if self.is_compact:
+            self.lbl_version.setVisible(False)
             self.bt_pill.setVisible(False)
             self.btn_zoom_out.setVisible(False)
             self.btn_zoom_in.setVisible(False)
@@ -1746,6 +1761,7 @@ class LyricOverlayWindow(QWidget):
             self.lbl_active_trans.setVisible(False)
             self.resize(self.width(), 90)
         else:
+            self.lbl_version.setVisible(True)
             if self.current_bt_state and self.current_bt_state.connected:
                 self.bt_pill.setVisible(True)
             self.btn_zoom_out.setVisible(True)

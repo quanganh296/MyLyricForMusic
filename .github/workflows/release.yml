@@ -32,6 +32,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Determine release tag
+        id: meta
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Sync app version with release tag
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          if ($tag) {
+            Set-Content -Path "modules/version.py" -Value "APP_VERSION = `"$tag`"" -Encoding UTF8
+          }
+
       - name: Build LyricNow.exe with PyInstaller
         run: |
           pyinstaller LyricNow.spec --noconfirm
@@ -44,17 +63,6 @@ jobs:
             exit 1
           }
           Get-Item "dist/LyricNow.exe" | Select-Object Name, Length
-
-      - name: Determine release tag
-        id: meta
-        shell: pwsh
-        run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ github.event.inputs.tag }}"
-          } else {
-            $tag = "${{ github.ref_name }}"
-          }
-          echo "tag=$tag" >> $env:GITHUB_OUTPUT
 
       - name: Publish GitHub Release with LyricNow.exe
         uses: softprops/action-gh-release@v2

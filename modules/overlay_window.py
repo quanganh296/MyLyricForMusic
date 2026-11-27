@@ -101,6 +101,109 @@ class ThemedGlassFrame(QFrame):
         super().paintEvent(event)
 
 
+class RoundVolumeSlider(QSlider):
+    """Smooth custom-painted volume slider with a perfectly circular thumb and click-to-seek."""
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.setRange(0, 100)
+        self.setFixedHeight(22)
+        self.setMinimumWidth(68)
+        self.setMaximumWidth(86)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self._hovered = False
+        self._muted_visual = False
+        self._accent_color = QColor("#ffffff")
+
+    def set_visual_state(self, muted: bool = False, accent_hex: str = None):
+        changed = (self._muted_visual != bool(muted))
+        self._muted_visual = bool(muted)
+        if accent_hex:
+            c = QColor(accent_hex)
+            if c.isValid() and c != self._accent_color:
+                self._accent_color = c
+                changed = True
+        if changed:
+            self.update()
+
+    def _pos_to_value(self, x: float) -> int:
+        pad = 8.0
+        span = max(1.0, self.width() - 2.0 * pad)
+        ratio = max(0.0, min(1.0, (x - pad) / span))
+        return int(round(self.minimum() + ratio * (self.maximum() - self.minimum())))
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setSliderDown(True)
+            self.setValue(self._pos_to_value(event.position().x()))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self.setValue(self._pos_to_value(event.position().x()))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setSliderDown(False)
+            self.update()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = float(self.width())
+        h = float(self.height())
+        cy = h / 2.0
+        pad = 8.0
+        track_h = 4.5
+        track_w = max(1.0, w - 2.0 * pad)
+
+        rng = max(1, self.maximum() - self.minimum())
+        ratio = max(0.0, min(1.0, (self.value() - self.minimum()) / rng))
+        knob_x = pad + ratio * track_w
+
+        # Background groove capsule
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 65))
+        painter.drawRoundedRect(QRectF(pad, cy - track_h / 2.0, track_w, track_h), track_h / 2.0, track_h / 2.0)
+
+        # Active filled track capsule
+        fill_w = max(0.0, knob_x - pad)
+        if fill_w > 0.5:
+            fill_color = QColor(255, 255, 255, 115) if self._muted_visual else QColor(self._accent_color)
+            painter.setBrush(fill_color)
+            painter.drawRoundedRect(QRectF(pad, cy - track_h / 2.0, fill_w, track_h), track_h / 2.0, track_h / 2.0)
+
+        # Circular thumb with subtle shadow & hover expansion
+        r = 7.2 if (self._hovered or self.isSliderDown()) else 6.2
+        painter.setBrush(QColor(0, 0, 0, 75))
+        painter.drawEllipse(QRectF(knob_x - r - 1.0, cy - r - 0.5, (r + 1.0) * 2.0, (r + 1.0) * 2.0))
+
+        thumb_color = QColor(226, 232, 240, 210) if self._muted_visual else QColor("#ffffff")
+        painter.setBrush(thumb_color)
+        painter.drawEllipse(QRectF(knob_x - r, cy - r, r * 2.0, r * 2.0))
+        painter.end()
+
+
 class LyricOverlayWindow(QWidget):
     request_settings = Signal()
     request_search = Signal()
@@ -158,6 +261,12 @@ class LyricOverlayWindow(QWidget):
         self.sync_timer.timeout.connect(self.update_lyric_display)
         self.sync_timer.start(50)
 
+        # Live Windows active audio output device & volume sync timer (450ms interval)
+        self._last_vol_state = None
+        self.vol_sync_timer = QTimer(self)
+        self.vol_sync_timer.timeout.connect(self.sync_system_volume)
+        self.vol_sync_timer.start(450)
+
     def setup_window_flags(self):
         self.setWindowFlags(
             Qt.WindowType.Window |
@@ -174,6 +283,10 @@ class LyricOverlayWindow(QWidget):
             self.setWindowIcon(QIcon(ico_path))
 
     def closeEvent(self, event):
+        if hasattr(self, "sync_timer") and self.sync_timer:
+            self.sync_timer.stop()
+        if hasattr(self, "vol_sync_timer") and self.vol_sync_timer:
+            self.vol_sync_timer.stop()
         if self.translation_worker:
             self.translation_worker.cancel()
             self.translation_worker.wait(400)
@@ -424,9 +537,12 @@ class LyricOverlayWindow(QWidget):
             mbtn.setCursor(Qt.CursorShape.PointingHandCursor)
             mbtn.setObjectName("MediaBtn")
 
-        # Volume Controls
-        self.vol_container = QHBoxLayout()
-        self.vol_container.setSpacing(4)
+        # Volume Controls (wrapped in a clean container so % label never overlaps slider in narrow Mode 2)
+        self.vol_widget = QWidget()
+        self.vol_widget.setObjectName("VolWidget")
+        self.vol_container = QHBoxLayout(self.vol_widget)
+        self.vol_container.setContentsMargins(0, 0, 0, 0)
+        self.vol_container.setSpacing(6)
 
         self.btn_vol = QPushButton()
         self.btn_vol.setFixedSize(26, 24)
@@ -435,21 +551,23 @@ class LyricOverlayWindow(QWidget):
         self.btn_vol.setToolTip("Bật / Tắt tiếng âm lượng (Mute)")
         self.btn_vol.clicked.connect(self.toggle_volume_mute)
 
-        self.slider_vol = QSlider(Qt.Orientation.Horizontal)
-        self.slider_vol.setFixedWidth(80)
-        self.slider_vol.setRange(0, 100)
-        self.slider_vol.setToolTip("Kéo để tăng / giảm âm lượng hệ thống & YouTube")
-        self.slider_vol.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.slider_vol = RoundVolumeSlider(self.vol_widget)
         self.slider_vol.setObjectName("VolSlider")
+        self.slider_vol.setToolTip("Kéo để tăng / giảm âm lượng thiết bị phát đang dùng")
 
-        init_vol = self.volume_manager.get_volume()
+        init_vol, init_muted, init_dev = self.volume_manager.get_state()
         self.slider_vol.setValue(init_vol)
+        self.slider_vol.set_visual_state(muted=init_muted)
 
-        self.lbl_vol_val = QLabel(f"{init_vol}%")
+        self.lbl_vol_val = QLabel("Mute" if init_muted else f"{init_vol}%")
         self.lbl_vol_val.setStyleSheet("font-size: 11px; color: #ffffff; font-weight: bold; font-family: 'Segoe UI';")
-        self.lbl_vol_val.setFixedWidth(32)
+        self.lbl_vol_val.setFixedWidth(36)
+        self.lbl_vol_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        self.update_volume_icon(init_vol, self.volume_manager.is_muted())
+        self.update_volume_icon(init_vol, init_muted)
+        if init_dev:
+            self.slider_vol.setToolTip(f"Thiết bị phát: {init_dev} ({init_vol}%)")
+            self.btn_vol.setToolTip(f"Bật / Tắt tiếng — {init_dev}")
         self.slider_vol.valueChanged.connect(self.on_volume_slider_changed)
 
         self.vol_container.addWidget(self.btn_vol)
@@ -499,7 +617,7 @@ class LyricOverlayWindow(QWidget):
         self.bottom_bar.addWidget(self.btn_play)
         self.bottom_bar.addWidget(self.btn_next)
         self.bottom_bar.addStretch()
-        self.bottom_bar.addLayout(self.vol_container)
+        self.bottom_bar.addWidget(self.vol_widget)
 
         # Resizable handle (Bottom-Right Size Grip)
         self.size_grip = QSizeGrip(self.container)
@@ -803,22 +921,53 @@ class LyricOverlayWindow(QWidget):
         super().wheelEvent(event)
 
     # ---------------------------------------------------------
-    # Volume Controls
+    # Volume Controls (Live Sync with Active Windows Audio Device)
     # ---------------------------------------------------------
+    def sync_system_volume(self):
+        """Syncs slider & icon in real time with the active Windows output device (speakers or headphones)."""
+        if not hasattr(self, "slider_vol") or self.slider_vol.isSliderDown():
+            return
+        try:
+            vol, muted, dev_name = self.volume_manager.get_state()
+        except Exception:
+            return
+
+        state = (vol, muted, dev_name)
+        if state == getattr(self, "_last_vol_state", None):
+            return
+        self._last_vol_state = state
+
+        self.slider_vol.blockSignals(True)
+        self.slider_vol.setValue(vol)
+        self.slider_vol.blockSignals(False)
+        self.slider_vol.set_visual_state(muted=muted)
+
+        self.lbl_vol_val.setText("Mute" if muted else f"{vol}%")
+        self.update_volume_icon(vol, muted)
+
+        if dev_name:
+            status_txt = "Đang tắt tiếng" if muted else f"{vol}%"
+            self.slider_vol.setToolTip(f"Thiết bị phát: {dev_name} ({status_txt})")
+            self.btn_vol.setToolTip(f"Bật / Tắt tiếng — {dev_name}")
+
     def on_volume_slider_changed(self, value: int):
         self.volume_manager.set_volume(value)
-        self.lbl_vol_val.setText(f"{value}%")
         is_mute = (value == 0) or self.volume_manager.is_muted()
+        self.lbl_vol_val.setText("Mute" if (is_mute and value > 0) else f"{value}%")
+        self.slider_vol.set_visual_state(muted=is_mute)
         self.update_volume_icon(value, is_mute)
+        self._last_vol_state = (value, is_mute, self.volume_manager.get_device_name())
 
     def toggle_volume_mute(self):
         new_mute = self.volume_manager.toggle_mute()
-        curr_vol = self.volume_manager.get_volume()
+        curr_vol, _, dev_name = self.volume_manager.get_state()
+        self.slider_vol.blockSignals(True)
+        self.slider_vol.setValue(curr_vol)
+        self.slider_vol.blockSignals(False)
+        self.slider_vol.set_visual_state(muted=new_mute)
         self.update_volume_icon(curr_vol, new_mute)
-        if new_mute:
-            self.lbl_vol_val.setText("Mute")
-        else:
-            self.lbl_vol_val.setText(f"{curr_vol}%")
+        self.lbl_vol_val.setText("Mute" if new_mute else f"{curr_vol}%")
+        self._last_vol_state = (curr_vol, new_mute, dev_name)
 
     def update_volume_icon(self, vol_percent: int, is_muted: bool):
         if is_muted or vol_percent == 0:
@@ -1027,26 +1176,6 @@ class LyricOverlayWindow(QWidget):
                 border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 6px;
             }}
-            QSlider#VolSlider::groove:horizontal {{
-                height: 5px;
-                background: rgba(255, 255, 255, 0.25);
-                border-radius: 2px;
-            }}
-            QSlider#VolSlider::sub-page:horizontal {{
-                background: #ffffff;
-                border-radius: 2px;
-            }}
-            QSlider#VolSlider::handle:horizontal {{
-                background: #ffffff;
-                border: 1px solid #ffffff;
-                width: 14px;
-                height: 14px;
-                margin: -4px 0;
-                border-radius: 7px;
-            }}
-            QSlider#VolSlider::handle:horizontal:hover {{
-                background: #ffffff;
-            }}
             QSizeGrip {{
                 width: 14px;
                 height: 14px;
@@ -1054,6 +1183,8 @@ class LyricOverlayWindow(QWidget):
             }}
         """
         self.container.setStyleSheet(qss)
+        if hasattr(self, "slider_vol"):
+            self.slider_vol.set_visual_state(muted=self.slider_vol._muted_visual, accent_hex=accent_hex)
         self._last_fit_style_key = None
 
         # Refresh or start translation when settings change
@@ -1767,9 +1898,7 @@ class LyricOverlayWindow(QWidget):
             self.btn_prev.setVisible(False)
             self.btn_play.setVisible(False)
             self.btn_next.setVisible(False)
-            self.btn_vol.setVisible(False)
-            self.slider_vol.setVisible(False)
-            self.lbl_vol_val.setVisible(False)
+            self.vol_widget.setVisible(False)
             self.btn_compact.setIcon(IconFactory.create_icon("expand", "#e2e8f0"))
             self.lbl_active_romaji.setVisible(False)
             self.lbl_active_trans.setVisible(False)
@@ -1786,9 +1915,7 @@ class LyricOverlayWindow(QWidget):
             self.btn_prev.setVisible(True)
             self.btn_play.setVisible(True)
             self.btn_next.setVisible(True)
-            self.btn_vol.setVisible(True)
-            self.slider_vol.setVisible(True)
-            self.lbl_vol_val.setVisible(True)
+            self.vol_widget.setVisible(True)
             self.btn_compact.setIcon(IconFactory.create_icon("compact", "#e2e8f0"))
             self._update_active_translation_label(self._effective_display_index())
             self.resize(self.width(), max(160, int(self.settings.get("win_h", 195))))

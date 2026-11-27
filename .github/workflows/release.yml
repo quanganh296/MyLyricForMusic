@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -64,24 +66,62 @@ jobs:
           }
           Get-Item "dist/LyricNow.exe" | Select-Object Name, Length
 
+      - name: Generate release notes for tag
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $updates = ""
+
+          if (Test-Path "CHANGELOG.md") {
+            $lines = Get-Content -Path "CHANGELOG.md" -Encoding UTF8
+            $capture = $false
+            $buf = @()
+            foreach ($ln in $lines) {
+              if ($ln -match "^##\s+$([regex]::Escape($tag))\b") {
+                $capture = $true
+                continue
+              }
+              if ($capture -and $ln -match "^##\s+") {
+                break
+              }
+              if ($capture) {
+                $buf += $ln
+              }
+            }
+            $updates = ($buf -join "`n").Trim()
+          }
+
+          if (-not $updates) {
+            $prevTag = (git tag --sort=-v:refname | Where-Object { $_ -ne $tag } | Select-Object -First 1)
+            if ($prevTag) {
+              $updates = (git log "$prevTag..HEAD" --pretty=format:"- %s" | Out-String).Trim()
+            } else {
+              $updates = (git log -n 5 --pretty=format:"- %s" | Out-String).Trim()
+            }
+          }
+
+          $bodyLines = @(
+            "## Có gì mới trong phiên bản $tag",
+            "",
+            $updates,
+            "",
+            "---",
+            "",
+            "## Tải về & Sử dụng ngay (Không cần cài Python / Không cần clone code)",
+            "",
+            '1. Tải file **`LyricNow.exe`** ở mục **Assets** bên dưới.',
+            '2. Nhấp đúp mở **`LyricNow.exe`** để sử dụng ngay trên Windows 10 / Windows 11.',
+            '   *(Nếu Windows Defender SmartScreen hiện cảnh báo tệp tải mới từ Internet, chọn **More info** -> **Run anyway**.)*'
+          )
+          Set-Content -Path "release_body.md" -Value ($bodyLines -join "`n") -Encoding UTF8
+          Get-Content -Path "release_body.md"
+
       - name: Publish GitHub Release with LyricNow.exe
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: "LyricNow ${{ steps.meta.outputs.tag }} (Windows)"
-          body: |
-            ## Tải về & Sử dụng ngay (Không cần cài Python / Không cần clone code)
-
-            1. Tải file **`LyricNow.exe`** ở mục **Assets** bên dưới.
-            2. Nhấp đúp mở **`LyricNow.exe`** để sử dụng ngay trên Windows 10 / Windows 11.
-               *(Nếu Windows Defender SmartScreen hiện cảnh báo tệp tải mới từ Internet, chọn **More info** -> **Run anyway**.)*
-
-            ### Tính năng nổi bật
-            - **2 chế độ hiển thị:** Mode 1 (Video bên phải + Lyric bên trái nền mờ & đổi màu chữ tự động theo video, hỗ trợ Toàn màn hình `F11`) và Mode 2 (Chỉ hiện Lyric ở giữa, thu phóng linh hoạt).
-            - **Tự nhận diện & dịch nhạc nước ngoài 3 tầng:** Hỗ trợ Nhật, Hàn, Trung, Anh, Thái, Nga... tự tạo phiên âm (Romaji / Pinyin / Latin) và dịch tiếng Việt ngay dưới lời gốc.
-            - **Đồng bộ thời gian thực Windows GSMTC:** Tự bắt nhạc từ YouTube, Chrome, Edge, Spotify... tự bù nhạc dạo khi video cắt ngắn và lưu độ lệch riêng theo từng bài.
-            - **Hiển thị pin tai nghe Bluetooth:** Báo phần trăm pin và trạng thái kết nối tai nghe bên Trái / Phải / cả 2 bên.
-            - **Tìm kiếm lời thủ công & theo link YouTube.**
+          body_path: release_body.md
           files: dist/LyricNow.exe
           draft: false
           prerelease: false

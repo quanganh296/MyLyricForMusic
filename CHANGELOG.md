@@ -1,5 +1,8 @@
 # Lịch sử cập nhật LyricNow
 
+## v1.1.4
+- **Chuyển nhanh thiết bị phát âm thanh (Loa máy tính / Tai nghe Bluetooth) bằng menu trượt lên:** Nhấn trực tiếp vào thanh pin tai nghe ở góc dưới bên trái để trượt lên danh sách toàn bộ loa/tai nghe đang hoạt động trên Windows, cho phép chuyển đổi tức thì giữa loa Bluetooth và loa hệ thống máy tính mà không cần bật/tắt Bluetooth; thanh âm lượng cũng tự động đồng bộ ngay theo thiết bị vừa chọn.
+
 ## v1.1.3
 - **Sửa triệt để lỗi nhận sai lời & dịch sai ngôn ngữ (VD: nhạc Nhật/Hàn/Trung bị nhận nhầm sang bản Tiếng Anh trùng tên):** Khóa ưu tiên khớp ca sĩ (từ cả tên kênh lẫn tên video YouTube như `Michita ft 愛海`) và kiểm tra tương thích hệ chữ trước khi so thời lượng, tự động làm mới cache cũ bị khớp sai ca sĩ.
 - **Khóa đúng video YouTube khi bật/tắt nút `Video` trong Mode Karaoke:** Chấm điểm chọn chính xác video đang phát theo tiêu đề + tên kênh + thời lượng, khóa `video_id` và lưu đệm luồng phát để khi bật/tắt `Video` trong Mode 3 luôn giữ nguyên đúng video đó mà không tự tìm sang video khác.

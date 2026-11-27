@@ -16,6 +16,7 @@ from modules.lyrics_translator import TranslationWorker, has_non_latin_script
 from modules.version import APP_VERSION
 from modules.i18n import tr
 from modules.karaoke_widgets import ModeDropdownButton, KaraokeLyricWidget, SplitTransitionStage, SongTitleOverlay
+from modules.audio_output_popup import ClickableAudioPill, AudioOutputPopup
 
 
 class ThemedGlassFrame(QFrame):
@@ -729,11 +730,13 @@ class LyricOverlayWindow(QWidget):
         self.vol_container.addWidget(self.slider_vol)
         self.vol_container.addWidget(self.lbl_vol_val)
 
-        # Bluetooth Headphone Battery Pill (Left side of bottom bar; hidden when no BT headset connected)
-        self.bt_pill = QFrame()
+        # Bluetooth Headphone Battery & Quick Audio Output Switcher Pill (click to slide up speaker/BT selector!)
+        self._audio_popup = None
+        self.bt_pill = ClickableAudioPill()
         self.bt_pill.setObjectName("BtPill")
+        self.bt_pill.clicked.connect(self.toggle_audio_output_popup)
         bt_pill_layout = QHBoxLayout(self.bt_pill)
-        bt_pill_layout.setContentsMargins(8, 3, 8, 3)
+        bt_pill_layout.setContentsMargins(8, 3, 7, 3)
         bt_pill_layout.setSpacing(5)
 
         self.lbl_bt_icon = QLabel()
@@ -748,9 +751,14 @@ class LyricOverlayWindow(QWidget):
         self.lbl_bt_text.setObjectName("BtPillText")
         self.lbl_bt_text.setStyleSheet("font-size: 11px; color: #ffffff; font-weight: bold; font-family: 'Segoe UI';")
 
+        self.lbl_bt_chevron = QLabel()
+        self.lbl_bt_chevron.setPixmap(IconFactory.create_pixmap("chevron_up", "#cbd5e1", 9))
+        self.lbl_bt_chevron.setFixedSize(10, 12)
+
         bt_pill_layout.addWidget(self.lbl_bt_icon)
         bt_pill_layout.addWidget(self.lbl_bt_batt_icon)
         bt_pill_layout.addWidget(self.lbl_bt_text)
+        bt_pill_layout.addWidget(self.lbl_bt_chevron)
         self.bt_pill.setVisible(False)
 
         # App Version Label (Bottom-Left corner)
@@ -1303,9 +1311,53 @@ class LyricOverlayWindow(QWidget):
         self.update_volume_icon(vol, muted)
 
         if dev_name:
-            status_txt = "Đang tắt tiếng" if muted else f"{vol}%"
-            self.slider_vol.setToolTip(f"Thiết bị phát: {dev_name} ({status_txt})")
-            self.btn_vol.setToolTip(f"Bật / Tắt tiếng — {dev_name}")
+            status_txt = tr(self._lang(), "mute") if muted else f"{vol}%"
+            self.slider_vol.setToolTip(tr(self._lang(), "tip_vol_dev", dev=dev_name, status=status_txt))
+            self.btn_vol.setToolTip(tr(self._lang(), "tip_vol_mute", dev=dev_name))
+            self._update_bt_pill_output_icon(dev_name)
+
+    def _update_bt_pill_output_icon(self, active_dev_name: str = ""):
+        """Reflects whether active playback is routed to Bluetooth/Headphones or PC System Speakers."""
+        if not hasattr(self, "lbl_bt_icon"):
+            return
+        low = (active_dev_name or "").lower()
+        bt_name = (self.current_bt_state.device_name or "").lower() if (self.current_bt_state and self.current_bt_state.connected) else ""
+        is_hp = any(k in low for k in ("headphone", "headset", "earphone", "bluetooth", "airpods", "buds", "tws", "tai nghe"))
+        if not is_hp and bt_name and len(bt_name) >= 3:
+            is_hp = (bt_name in low) or any(w in low for w in bt_name.split() if len(w) >= 4)
+        accent_hex = self.adaptive_palette.get("accent_hex", "#38bdf8")
+        if is_hp or not low:
+            self.lbl_bt_icon.setPixmap(IconFactory.create_pixmap("headphones", "#ffffff", 13))
+        else:
+            # Bluetooth is connected, but user routed audio to PC system speakers
+            self.lbl_bt_icon.setPixmap(IconFactory.create_pixmap("volume", accent_hex, 13))
+
+    def toggle_audio_output_popup(self):
+        """Slides up the Audio Output Device Selector directly above the bottom-left pill."""
+        if self._audio_popup and self._audio_popup.isVisible():
+            self._audio_popup.close()
+            self._audio_popup = None
+            return
+
+        bt_name = (self.current_bt_state.device_name or "") if (self.current_bt_state and self.current_bt_state.connected) else ""
+        devices = self.volume_manager.list_output_devices(bt_device_name=bt_name)
+        accent_hex = self.adaptive_palette.get("accent_hex", "#38bdf8")
+
+        popup = AudioOutputPopup(devices, accent_hex=accent_hex, app_lang=self._lang(), parent=self)
+        popup.device_selected.connect(self._on_audio_device_selected)
+        self._audio_popup = popup
+        anchor = self.bt_pill.mapToGlobal(QPoint(0, 0))
+        popup.show_slide_up(anchor, animate=True)
+
+    def _on_audio_device_selected(self, dev_id: str):
+        """Switches active Windows playback output immediately without toggling Bluetooth."""
+        if not dev_id:
+            return
+        ok = self.volume_manager.set_default_output_device(dev_id)
+        if ok:
+            self._last_vol_state = None
+            self.sync_system_volume()
+            QTimer.singleShot(120, self.sync_system_volume)
 
     def on_volume_slider_changed(self, value: int):
         self.volume_manager.set_volume(value)
@@ -1617,6 +1669,10 @@ class LyricOverlayWindow(QWidget):
                 background-color: rgba(255, 255, 255, 0.11);
                 border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 6px;
+            }}
+            #BtPill:hover {{
+                background-color: rgba(255, 255, 255, 0.22);
+                border: 1px solid rgba(255, 255, 255, 0.45);
             }}
             QSizeGrip {{
                 width: 14px;
@@ -2385,6 +2441,11 @@ class LyricOverlayWindow(QWidget):
                 self.bt_pill.setToolTip(f"{dev_name} (Đã kết nối - không báo phần trăm pin)")
 
         if not self.is_compact:
+            cur_tip = self.bt_pill.toolTip() or ""
+            hint = tr(self._lang(), "audio_out_click_tip")
+            if hint not in cur_tip:
+                self.bt_pill.setToolTip(f"{cur_tip}\n{hint}" if cur_tip else hint)
+            self._update_bt_pill_output_icon(self.volume_manager.get_device_name())
             self.bt_pill.setVisible(True)
 
     def toggle_compact(self):

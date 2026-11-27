@@ -49,6 +49,7 @@ class IconFactory:
         "language": "fa5s.language",
         "microphone": "fa5s.microphone",
         "chevron_down": "fa5s.chevron-down",
+        "chevron_up": "fa5s.chevron-up",
         "download": "fa5s.download",
         "external_link": "fa5s.external-link-alt",
         "arrow_up": "fa5s.arrow-circle-up",

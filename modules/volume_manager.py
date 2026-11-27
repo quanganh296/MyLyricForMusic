@@ -1,12 +1,52 @@
 import ctypes
+from ctypes import POINTER, HRESULT, c_uint32, c_void_p
+from ctypes.wintypes import LPCWSTR
 import time
 
 try:
-    from pycaw.pycaw import AudioUtilities
+    import comtypes
+    from comtypes import GUID, IUnknown, COMMETHOD
+    from pycaw.pycaw import AudioUtilities, EDataFlow, DEVICE_STATE
     PYCAW_AVAILABLE = True
 except Exception as e:
     print(f"[VolumeManager Warning] pycaw import failed: {e}")
     PYCAW_AVAILABLE = False
+
+
+if PYCAW_AVAILABLE:
+    _CLSID_CPolicyConfigClient = GUID("{870af99c-171d-4f9e-af0d-e63df40c2bc9}")
+
+    class _IPolicyConfig(IUnknown):
+        _iid_ = GUID("{f8679f50-850a-41cf-9c72-430f290290c8}")
+        _methods_ = [
+            COMMETHOD([], HRESULT, "GetMixFormat", (["in"], LPCWSTR, "pwstrDeviceId"), (["out"], POINTER(c_void_p), "ppFormat")),
+            COMMETHOD([], HRESULT, "GetDeviceFormat", (["in"], LPCWSTR, "pwstrDeviceId"), (["in"], c_uint32, "bDefault"), (["out"], POINTER(c_void_p), "ppFormat")),
+            COMMETHOD([], HRESULT, "ResetDeviceFormat", (["in"], LPCWSTR, "pwstrDeviceId")),
+            COMMETHOD([], HRESULT, "SetDeviceFormat", (["in"], LPCWSTR, "pwstrDeviceId"), (["in"], c_void_p, "pEndpointFormat"), (["in"], c_void_p, "pMixFormat")),
+            COMMETHOD([], HRESULT, "GetProcessingPeriod", (["in"], LPCWSTR, "pwstrDeviceId"), (["in"], c_uint32, "bDefault"), (["out"], POINTER(c_void_p), "pmftDefaultPeriod"), (["out"], POINTER(c_void_p), "pmftMinimumPeriod")),
+            COMMETHOD([], HRESULT, "SetProcessingPeriod", (["in"], LPCWSTR, "pwstrDeviceId"), (["in"], c_void_p, "pftPeriod")),
+            COMMETHOD([], HRESULT, "GetShareMode", (["in"], LPCWSTR, "pwstrDeviceId"), (["out"], POINTER(c_void_p), "pMode")),
+            COMMETHOD([], HRESULT, "SetShareMode", (["in"], LPCWSTR, "pwstrDeviceId"), (["in"], c_void_p, "pMode")),
+            COMMETHOD([], HRESULT, "GetPropertyValue", (["in"], LPCWSTR, "pwstrDeviceId"), (["in"], c_void_p, "key"), (["out"], POINTER(c_void_p), "pv")),
+            COMMETHOD([], HRESULT, "SetPropertyValue", (["in"], LPCWSTR, "pwstrDeviceId"), (["in"], c_void_p, "key"), (["in"], c_void_p, "pv")),
+            COMMETHOD([], HRESULT, "SetDefaultEndpoint", (["in"], LPCWSTR, "pwstrDeviceId"), (["in"], c_uint32, "role")),
+            COMMETHOD([], HRESULT, "SetEndpointVisibility", (["in"], LPCWSTR, "pwstrDeviceId"), (["in"], c_uint32, "bVisible")),
+        ]
+
+
+def _classify_output_device(friendly_name: str, bt_device_name: str = "") -> str:
+    """Classifies a Windows render endpoint as 'bluetooth', 'headphones', or 'speaker'."""
+    low = (friendly_name or "").lower()
+    bt_low = (bt_device_name or "").strip().lower()
+    if bt_low and len(bt_low) >= 3 and (bt_low in low or any(w in low for w in bt_low.split() if len(w) >= 4)):
+        return "bluetooth"
+    bt_hints = ("bluetooth", "airpods", "buds", "hands-free", "a2dp", "tws", "wireless", "bt ")
+    if any(h in low for h in bt_hints):
+        return "bluetooth"
+    hp_hints = ("headphone", "headset", "earphone", "tai nghe", "earbuds")
+    if any(h in low for h in hp_hints):
+        return "headphones"
+    return "speaker"
 
 
 class VolumeManager:
@@ -109,6 +149,72 @@ class VolumeManager:
     def get_device_name(self) -> str:
         self._bind_active_device(force=False)
         return self._device_name
+
+    def list_output_devices(self, bt_device_name: str = "") -> list:
+        """
+        Lists all currently active Windows audio playback (render) endpoints
+        (e.g. Bluetooth Headphones, PC Speakers, Wired Headphones, HDMI Audio).
+        Returns list of dicts: [{"id", "name", "is_default", "kind"}].
+        """
+        if not PYCAW_AVAILABLE:
+            return []
+        devices = []
+        try:
+            if self._enumerator is None:
+                self._enumerator = AudioUtilities.GetDeviceEnumerator()
+            active_id = self._get_default_endpoint_id()
+            col = self._enumerator.EnumAudioEndpoints(EDataFlow.eRender.value, DEVICE_STATE.ACTIVE.value)
+            count = col.GetCount()
+            for i in range(count):
+                try:
+                    raw = col.Item(i)
+                    dev = AudioUtilities.CreateDevice(raw)
+                    dev_id = getattr(dev, "id", None)
+                    name = (getattr(dev, "FriendlyName", None) or "").strip()
+                    if not dev_id or not name:
+                        continue
+                    devices.append({
+                        "id": dev_id,
+                        "name": name,
+                        "is_default": bool(active_id and dev_id == active_id),
+                        "kind": _classify_output_device(name, bt_device_name=bt_device_name),
+                    })
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"[VolumeManager Error] Failed to enumerate output devices: {e}")
+
+        # Show currently active device first, then Bluetooth/headphones, then speakers
+        kind_order = {"bluetooth": 0, "headphones": 1, "speaker": 2}
+        devices.sort(key=lambda d: (0 if d["is_default"] else 1, kind_order.get(d["kind"], 3), d["name"].lower()))
+        return devices
+
+    def set_default_output_device(self, device_id: str) -> bool:
+        """
+        Switches the Windows default playback device immediately across Console, Multimedia,
+        and Communications roles WITHOUT disconnecting or toggling Bluetooth.
+        """
+        if not PYCAW_AVAILABLE or not device_id:
+            return False
+        try:
+            pc = comtypes.CoCreateInstance(
+                _CLSID_CPolicyConfigClient,
+                interface=_IPolicyConfig,
+                clsctx=comtypes.CLSCTX_ALL,
+            )
+            ok = False
+            for role in (0, 1, 2):  # eConsole, eMultimedia, eCommunications
+                hr = pc.SetDefaultEndpoint(device_id, role)
+                if hr == 0:
+                    ok = True
+            if ok:
+                # Immediately re-bind active volume endpoint to the newly chosen speaker/headphone!
+                self._current_device_id = None
+                self._bind_active_device(force=True)
+            return ok
+        except Exception as e:
+            print(f"[VolumeManager Error] Failed to switch default audio device: {e}")
+            return False
 
     def get_volume(self) -> int:
         """Returns current active device volume percentage (0 - 100)."""

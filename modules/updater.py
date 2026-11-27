@@ -262,27 +262,58 @@ def apply_windows_self_update(new_exe_path: str, current_exe_path: str) -> bool:
                 os.rename(old_p, cur_p)
             raise
 
-        # Launch freshly swapped LyricNow.exe directly with reset PyInstaller env (no cmd.exe / no .bat!)
-        # Setting PYINSTALLER_RESET_ENVIRONMENT=1 guarantees the new --onefile exe extracts its own _MEI dir cleanly.
+        # Launch freshly swapped LyricNow.exe directly with completely scrubbed PyInstaller/Qt env!
+        # Setting PYINSTALLER_RESET_ENVIRONMENT=1 + stripping _PYI_* / _MEIPASS* / _MEI* from PATH
+        # prevents "Failed to load Python DLL ...\_MEIxxxx\python311.dll" when restarting after update!
         clean_env = os.environ.copy()
+        drop_exact = {
+            "_MEIPASS", "_MEIPASS2", "PYTHONHOME", "PYTHONPATH",
+            "QT_PLUGIN_PATH", "QML2_IMPORT_PATH", "TCL_LIBRARY", "TK_LIBRARY",
+        }
         for k in list(clean_env.keys()):
-            if k.startswith("_PYI_") or k in ("_MEIPASS2", "PYTHONHOME", "PYTHONPATH"):
+            ku = k.upper()
+            if ku.startswith("_PYI_") or ku.startswith("_MEIPASS") or ku in drop_exact:
                 clean_env.pop(k, None)
+
+        # Scrub any old _MEI temp extraction folder from PATH so the new exe never looks in deleted parent temp!
+        meipass_dir = os.path.normcase(os.path.abspath(getattr(sys, "_MEIPASS", "") or ""))
+        for path_key in list(clean_env.keys()):
+            if path_key.upper() == "PATH":
+                parts = clean_env[path_key].split(os.pathsep)
+                filtered = []
+                for p in parts:
+                    np = os.path.normcase(os.path.abspath(p)) if p.strip() else ""
+                    if not p.strip():
+                        continue
+                    if meipass_dir and np.startswith(meipass_dir):
+                        continue
+                    if "\\_mei" in np or "/_mei" in np:
+                        continue
+                    filtered.append(p)
+                clean_env[path_key] = os.pathsep.join(filtered)
+
         clean_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-        creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        try:
-            subprocess.Popen(
-                [cur_p],
-                cwd=exe_dir,
-                env=clean_env,
-                close_fds=True,
-                creationflags=creation_flags,
-            )
-        except Exception:
+        new_grp = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
+        launched = False
+        for flags in (new_grp | breakaway, new_grp):
+            try:
+                subprocess.Popen(
+                    [cur_p],
+                    cwd=exe_dir,
+                    env=clean_env,
+                    close_fds=True,
+                    creationflags=flags,
+                )
+                launched = True
+                break
+            except Exception:
+                continue
+        if not launched:
             if hasattr(os, "startfile"):
                 os.startfile(cur_p)
             else:
-                raise
+                subprocess.Popen([cur_p], cwd=exe_dir, env=clean_env, close_fds=True)
         return True
     except Exception as e:
         print(f"[Updater Error] Clean self-update swap failed: {e}")

@@ -321,22 +321,34 @@ def decode_apple_airpods_adv(data: bytes) -> dict:
 
 def decode_fast_pair_service_data(data: bytes) -> dict:
     """
-    Decode Google Fast Pair (Service UUID 0xFE2C) BLE Service Data for Left / Right / Case battery.
-    Data starts with 2-byte little-endian UUID 2C FE followed by account key filter + battery TLV (0x33 or 0x34).
+    Strictly decode Google Fast Pair (Service UUID 0xFE2C) BLE Service Data for Left / Right / Case battery.
+    Follows the official TLV framing (i += 1 + field_len) so random Account Key Bloom filter bytes
+    are NEVER misread as fake 50%/60%/70% earbud battery percentages!
     """
-    if not data or len(data) < 6:
+    if not data or len(data) < 7:
         return None
     if data[0] != 0x2C or data[1] != 0xFE:
         return None
 
-    # Scan TLV fields starting after UUID (index 2)
-    i = 2
-    # Skip flags byte if present (first byte after 2c fe is often 0x00 flags)
-    while i < len(data) - 3:
-        b = data[i]
-        field_len = (b >> 4) & 0x0F
-        field_type = b & 0x0F
-        if field_type in (0x03, 0x04) and field_len == 3 and (i + 3) < len(data):
+    # Byte 2 is Flags byte (version bits 7..4 MUST be 0 in Fast Pair Account Key Data)
+    flags = data[2]
+    if (flags & 0xF0) != 0x00:
+        return None
+
+    # Walk strict length-prefixed TLV fields starting at index 3:
+    # Each TLV header byte: high nibble = field_len, low nibble = field_type.
+    # Battery info is strictly field_type 0x03 (show UI) or 0x04 (hide UI) with field_len == 3.
+    i = 3
+    n = len(data)
+    while i < n:
+        header = data[i]
+        field_len = (header >> 4) & 0x0F
+        field_type = header & 0x0F
+        next_i = i + 1 + field_len
+        if next_i > n:
+            return None  # Malformed/truncated TLV frame -> reject entire packet
+
+        if field_type in (0x03, 0x04) and field_len == 3:
             lb = data[i + 1]
             rb = data[i + 2]
             cb = data[i + 3]
@@ -346,6 +358,11 @@ def decode_fast_pair_service_data(data: bytes) -> dict:
             l_pct = lb & 0x7F
             r_pct = rb & 0x7F
             c_pct = cb & 0x7F
+
+            # Per Fast Pair spec, 0x7F (127) means unknown; 101..126 are invalid -> reject noise
+            for v in (l_pct, r_pct, c_pct):
+                if 100 < v < 0x7F:
+                    return None
 
             left_batt = l_pct if l_pct <= 100 else None
             right_batt = r_pct if r_pct <= 100 else None
@@ -364,8 +381,75 @@ def decode_fast_pair_service_data(data: bytes) -> dict:
                     "right_charging": r_chg,
                     "source": "Fast Pair BLE",
                 }
-        i += 1
+        i = next_i
     return None
+
+
+def _bt_addrs_match(pnp_addr: str, ble_addr: str) -> bool:
+    """Checks if a BLE advertisement address matches (or is adjacent to) the connected headset's Classic BT MAC."""
+    if not pnp_addr or not ble_addr:
+        return False
+    a = pnp_addr.replace(":", "").replace("-", "").upper()
+    b = ble_addr.replace(":", "").replace("-", "").upper()
+    if len(a) != 12 or len(b) != 12:
+        return False
+    if a == b:
+        return True
+    try:
+        # Dual-mode BT Classic / BLE headsets often differ by 1-2 in the last octet (same OUI prefix)
+        return a[:6] == b[:6] and abs(int(a, 16) - int(b, 16)) <= 4
+    except Exception:
+        return False
+
+
+class _BatteryValueFilter:
+    """
+    Rejects transient HFP/BLE battery spikes (e.g. 90% -> 60% -> 50% -> 90%) while still
+    reflecting real gradual discharge (<=10% steps) immediately and real step-changes
+    once confirmed across 3 consecutive polls (~12s).
+    """
+
+    def __init__(self, confirm_count: int = 3):
+        self.confirm_count = max(2, int(confirm_count))
+        self._stable = None
+        self._pending_val = None
+        self._pending_streak = 0
+
+    def reset(self):
+        self._stable = None
+        self._pending_val = None
+        self._pending_streak = 0
+
+    def update(self, raw_val):
+        if raw_val is None:
+            return self._stable
+        val = max(0, min(100, int(raw_val)))
+        if self._stable is None:
+            self._stable = val
+            self._pending_val = None
+            self._pending_streak = 0
+            return self._stable
+
+        # Normal discharge/charge step (HFP uses 10% increments) -> accept immediately!
+        if abs(val - self._stable) <= 10:
+            self._stable = val
+            self._pending_val = None
+            self._pending_streak = 0
+            return self._stable
+
+        # Sudden large jump (>10%, e.g. 90 -> 60 or 90 -> 50): confirm across consecutive consistent polls!
+        if self._pending_val is not None and abs(val - self._pending_val) <= 10:
+            self._pending_streak += 1
+            self._pending_val = val
+        else:
+            self._pending_val = val
+            self._pending_streak = 1
+
+        if self._pending_streak >= self.confirm_count:
+            self._stable = val
+            self._pending_val = None
+            self._pending_streak = 0
+        return self._stable
 
 
 class BluetoothBatteryWorker(QObject):
@@ -383,8 +467,41 @@ class BluetoothBatteryWorker(QObject):
         self._last_sig = None
 
         # Cached recent BLE per-earbud readings (timestamped, expire after 25s)
-        self._apple_ble_cache = None     # (timestamp, rssi, decoded_dict)
-        self._fastpair_ble_cache = None  # (timestamp, rssi, decoded_dict)
+        self._apple_ble_cache = None     # (timestamp, rssi, ble_addr, local_name, decoded_dict)
+        self._fastpair_ble_cache = None  # (timestamp, rssi, ble_addr, local_name, decoded_dict)
+
+        # Spike-rejection stability filters per device (eliminates 90 -> 60 -> 50 -> 90 HFP/BLE bounce)
+        self._filter_device_key = None
+        self._flt_overall = _BatteryValueFilter(confirm_count=3)
+        self._flt_left = _BatteryValueFilter(confirm_count=3)
+        self._flt_right = _BatteryValueFilter(confirm_count=3)
+        self._flt_case = _BatteryValueFilter(confirm_count=3)
+
+    def _reset_filters(self, dev_key=None):
+        self._filter_device_key = dev_key
+        self._flt_overall.reset()
+        self._flt_left.reset()
+        self._flt_right.reset()
+        self._flt_case.reset()
+
+    def _stabilize_state(self, state: HeadphoneBatteryState) -> HeadphoneBatteryState:
+        if not state or not state.connected:
+            self._reset_filters(None)
+            return state
+        dev_key = (state.device_name or "").strip().lower()
+        if dev_key != self._filter_device_key:
+            self._reset_filters(dev_key)
+
+        if state.overall_battery is not None:
+            state.overall_battery = self._flt_overall.update(state.overall_battery)
+        if state.has_lr_split:
+            if state.left_battery is not None:
+                state.left_battery = self._flt_left.update(state.left_battery)
+            if state.right_battery is not None:
+                state.right_battery = self._flt_right.update(state.right_battery)
+            if state.case_battery is not None:
+                state.case_battery = self._flt_case.update(state.case_battery)
+        return state
 
     def stop(self):
         self._running = False
@@ -407,9 +524,11 @@ class BluetoothBatteryWorker(QObject):
             def on_adv(sender, args):
                 try:
                     rssi = args.raw_signal_strength_in_d_bm
-                    if rssi < -72:
+                    if rssi < -64:
                         return
                     now = time.time()
+                    ble_addr = f"{args.bluetooth_address:012X}"
+                    local_name = (args.advertisement.local_name or "").strip()
 
                     # 1. Apple AirPods / Beats (Company ID 0x004C)
                     for m in args.advertisement.manufacturer_data:
@@ -421,11 +540,11 @@ class BluetoothBatteryWorker(QObject):
                             if decoded:
                                 prev = self._apple_ble_cache
                                 if not prev or (now - prev[0] > 8.0) or rssi >= prev[1] - 4:
-                                    self._apple_ble_cache = (now, rssi, decoded)
+                                    self._apple_ble_cache = (now, rssi, ble_addr, local_name, decoded)
 
                     # 2. Google Fast Pair (Service Data 0x16 -> 2C FE)
                     for ds in args.advertisement.data_sections:
-                        if ds.data_type == 0x16 and ds.data.length >= 6:
+                        if ds.data_type == 0x16 and ds.data.length >= 7:
                             rdr = DataReader.from_buffer(ds.data)
                             buf = bytearray(ds.data.length)
                             rdr.read_bytes(buf)
@@ -433,7 +552,7 @@ class BluetoothBatteryWorker(QObject):
                             if decoded:
                                 prev = self._fastpair_ble_cache
                                 if not prev or (now - prev[0] > 8.0) or rssi >= prev[1] - 4:
-                                    self._fastpair_ble_cache = (now, rssi, decoded)
+                                    self._fastpair_ble_cache = (now, rssi, ble_addr, local_name, decoded)
                 except Exception:
                     pass
 
@@ -513,7 +632,7 @@ class BluetoothBatteryWorker(QObject):
     async def _poll_once(self) -> HeadphoneBatteryState:
         headsets = scan_pnp_connected_headsets()
         if not headsets:
-            return HeadphoneBatteryState(connected=False)
+            return self._stabilize_state(HeadphoneBatteryState(connected=False))
 
         # Prefer headset that reports a battery value
         headsets.sort(key=lambda h: (len(h["batteries"]) > 0, h["is_apple"]), reverse=True)
@@ -522,8 +641,9 @@ class BluetoothBatteryWorker(QObject):
         now = time.time()
 
         # Check if multiple PnP nodes explicitly name Left / Right earbuds (e.g. LE Audio dual nodes)
+        # Sort deterministically by instance ID so multiple nodes never flicker in random order!
         pnp_left = pnp_right = pnp_case = overall = None
-        for b_name, b_val, _ in primary["batteries"]:
+        for b_name, b_val, _ in sorted(primary["batteries"], key=lambda x: (x[2] or "", x[0] or "")):
             nl = b_name.lower()
             if "left" in nl or nl.endswith(" l"):
                 pnp_left = b_val
@@ -546,7 +666,7 @@ class BluetoothBatteryWorker(QObject):
                         pnp_right = val
 
         if pnp_left is not None or pnp_right is not None:
-            return HeadphoneBatteryState(
+            return self._stabilize_state(HeadphoneBatteryState(
                 connected=True,
                 device_name=dev_name,
                 has_lr_split=True,
@@ -557,13 +677,13 @@ class BluetoothBatteryWorker(QObject):
                 case_battery=pnp_case,
                 overall_battery=overall,
                 source="Windows PnP L/R",
-            )
+            ))
 
         # Layer 2: Apple AirPods / Beats BLE Proximity Pairing (exact Left / Right / Case %)
         if primary["is_apple"] and self._apple_ble_cache:
-            ts, _, dec = self._apple_ble_cache
-            if now - ts <= 30.0:
-                return HeadphoneBatteryState(
+            ts, rssi, _, _, dec = self._apple_ble_cache
+            if (now - ts <= 30.0) and rssi >= -62:
+                return self._stabilize_state(HeadphoneBatteryState(
                     connected=True,
                     device_name=dev_name,
                     has_lr_split=True,
@@ -576,13 +696,19 @@ class BluetoothBatteryWorker(QObject):
                     right_charging=dec["right_charging"],
                     overall_battery=overall,
                     source=dec["source"],
-                )
+                ))
 
-        # Layer 3: Google Fast Pair BLE (exact Left / Right / Case %)
+        # Layer 3: Google Fast Pair BLE — ONLY accept when BLE device matches our connected headset
+        # (prevents random nearby phones/earbuds in the room from hijacking battery %!)
         if not primary["is_apple"] and self._fastpair_ble_cache:
-            ts, _, dec = self._fastpair_ble_cache
-            if now - ts <= 30.0:
-                return HeadphoneBatteryState(
+            ts, rssi, ble_addr, ble_name, dec = self._fastpair_ble_cache
+            name_match = bool(
+                ble_name and dev_name
+                and (ble_name.lower() in dev_name.lower() or dev_name.lower() in ble_name.lower())
+            )
+            addr_match = _bt_addrs_match(primary.get("addr") or "", ble_addr)
+            if (now - ts <= 30.0) and rssi >= -60 and (addr_match or name_match):
+                return self._stabilize_state(HeadphoneBatteryState(
                     connected=True,
                     device_name=dev_name,
                     has_lr_split=True,
@@ -595,12 +721,12 @@ class BluetoothBatteryWorker(QObject):
                     right_charging=dec["right_charging"],
                     overall_battery=overall,
                     source=dec["source"],
-                )
+                ))
 
         # Layer 4: BLE GATT Multi-Battery service (for connected LE Audio / BLE TWS)
         gatt_lr = await self._read_ble_gatt_lr(dev_name)
         if gatt_lr:
-            return HeadphoneBatteryState(
+            return self._stabilize_state(HeadphoneBatteryState(
                 connected=True,
                 device_name=dev_name,
                 has_lr_split=True,
@@ -611,10 +737,10 @@ class BluetoothBatteryWorker(QObject):
                 case_battery=gatt_lr["case_battery"],
                 overall_battery=overall,
                 source=gatt_lr["source"],
-            )
+            ))
 
-        # Layer 5: Universal Windows Classic HFP Battery fallback
-        return HeadphoneBatteryState(
+        # Layer 5: Universal Windows Classic HFP Battery fallback (spike-filtered!)
+        return self._stabilize_state(HeadphoneBatteryState(
             connected=True,
             device_name=dev_name,
             has_lr_split=False,
@@ -622,7 +748,7 @@ class BluetoothBatteryWorker(QObject):
             right_connected=True,
             overall_battery=overall,
             source="Windows HFP",
-        )
+        ))
 
     async def _monitor_loop(self):
         watcher, token = self._start_ble_watcher()

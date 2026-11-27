@@ -67,8 +67,14 @@ jobs:
             }
             if (Test-Path "LyricNow.manifest") {
               $mf = Get-Content "LyricNow.manifest" -Raw -Encoding UTF8
-              $mf = $mf -replace 'version="[0-9\.]+"', "version=`"$verDot`""
+              # Match ONLY the 4-part assemblyIdentity version="X.Y.Z.0" (never <?xml version="1.0" or manifestVersion="1.0"!)
+              $mf = $mf -creplace '(?<=\s)version="\d+\.\d+\.\d+\.\d+"', "version=`"$verDot`""
               Set-Content -Path "LyricNow.manifest" -Value $mf -Encoding UTF8
+              [xml]$xmlCheck = Get-Content "LyricNow.manifest" -Raw -Encoding UTF8
+              if ($xmlCheck.assembly.manifestVersion -ne "1.0" -or $xmlCheck.assembly.assemblyIdentity.version -ne $verDot) {
+                Write-Error "Invalid LyricNow.manifest after version sync!"
+                exit 1
+              }
             }
           }
 

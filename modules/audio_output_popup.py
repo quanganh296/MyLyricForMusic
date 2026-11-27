@@ -3,6 +3,10 @@ from modules.qt_compat import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     Qt, Signal, QPoint, QRect, QRectF, QTimer, QPainter, QColor, QPen, QApplication
 )
+try:
+    from PyQt6.QtCore import QEvent
+except ImportError:
+    from PySide6.QtCore import QEvent
 from modules.icon_factory import IconFactory
 from modules.i18n import tr
 
@@ -23,19 +27,38 @@ def _split_device_label(friendly_name: str):
 
 
 class ClickableAudioPill(QFrame):
-    """Clickable bottom-left Bluetooth / Audio Output pill that opens the slide-up output selector."""
+    """
+    Clickable bottom-left Bluetooth / Audio Output pill that opens the slide-up output selector.
+    Emits clicked strictly on mouseReleaseEvent (matching QPushButton semantics) so opening the
+    selector NEVER interrupts an in-progress mouse press/capture on Windows!
+    """
     clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._pressed = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
+            self._pressed = True
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            was_pressed = self._pressed
+            self._pressed = False
+            if was_pressed and self.rect().contains(event.position().toPoint()):
+                self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        self._pressed = False
+        super().leaveEvent(event)
 
 
 class AudioDeviceRow(QPushButton):
@@ -126,27 +149,33 @@ class AudioDeviceRow(QPushButton):
 
 class AudioOutputPopup(QWidget):
     """
-    Sleek dark-glass slide-up popup anchored above the bottom-left audio/BT pill.
-    Lets the user instantly switch between Bluetooth headphones, PC speakers, or
-    any active Windows audio render device without toggling Bluetooth!
+    Sleek dark-glass slide-up selector anchored above the bottom-left audio/BT pill.
+    Uses Qt.WindowType.Tool (NO Qt.WindowType.Popup OS mouse-grab!) and internal painter alpha
+    (NO Win32 setWindowOpacity animation on layered translucent windows!) so dismissing by
+    clicking anywhere outside NEVER freezes hover cursors or breaks overlay clicks!
     """
     device_selected = Signal(str)
+    closed = Signal()
 
     def __init__(self, devices: list, accent_hex: str = "#38bdf8", app_lang: str = "vi", parent=None):
         super().__init__(parent)
         self.accent_hex = accent_hex or "#38bdf8"
         self.app_lang = app_lang or "vi"
+        self._dismissed = False
+        self._filter_installed = False
+        self._render_opacity = 1.0
 
         self.setWindowFlags(
-            Qt.WindowType.Popup
+            Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.NoDropShadowWindowHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
 
         self._anim_step = 0
-        self._anim_total = 11  # ~176ms smooth 60 FPS slide-up
+        self._anim_total = 10  # ~160ms smooth 60 FPS slide-up
         self._start_y = 0
         self._target_y = 0
         self._target_x = 0
@@ -198,9 +227,72 @@ class AudioOutputPopup(QWidget):
         pop_h = min(380, 44 + row_count * 52 + 10)
         self.setFixedSize(pop_w, pop_h)
 
+    def _install_dismiss_filter(self):
+        app = QApplication.instance()
+        if app and not self._filter_installed:
+            app.installEventFilter(self)
+            self._filter_installed = True
+
+    def _remove_dismiss_filter(self):
+        app = QApplication.instance()
+        if app and self._filter_installed:
+            try:
+                app.removeEventFilter(self)
+            except Exception:
+                pass
+            self._filter_installed = False
+
+    def dismiss(self):
+        """Cleanly closes the popup without grabbing mouse or breaking parent hover/cursor state."""
+        if self._dismissed:
+            return
+        self._dismissed = True
+        if hasattr(self, "_anim_timer") and self._anim_timer:
+            self._anim_timer.stop()
+        self._remove_dismiss_filter()
+        self.closed.emit()
+        self.close()
+
     def _on_row_chosen(self, dev_id: str):
         self.device_selected.emit(dev_id)
-        self.close()
+        self.dismiss()
+
+    def eventFilter(self, watched, event):
+        if self._dismissed or not self.isVisible():
+            return False
+        etype = event.type()
+        if etype == QEvent.Type.MouseButtonPress:
+            try:
+                gpos = event.globalPosition().toPoint()
+            except Exception:
+                return False
+            if not self.frameGeometry().contains(gpos):
+                # Consume this single outside dismiss click inside our app so clicking the video
+                # pane to close the popup never accidentally pauses playback or drags the window!
+                self.dismiss()
+                return True
+        elif etype == QEvent.Type.ApplicationDeactivate:
+            self.dismiss()
+        elif etype == QEvent.Type.KeyPress:
+            try:
+                if event.key() == Qt.Key.Key_Escape:
+                    self.dismiss()
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
+            # Delay 40ms so clicking a child row inside this popup finishes cleanly before auto-dismiss
+            QTimer.singleShot(40, self._check_deactivate_dismiss)
+
+    def _check_deactivate_dismiss(self):
+        if self._dismissed or not self.isVisible():
+            return
+        if not self.isActiveWindow():
+            self.dismiss()
 
     def show_slide_up(self, anchor_global_top_left: QPoint, animate: bool = True):
         """Positions popup directly above anchor_global_top_left and slides it upward smoothly."""
@@ -219,18 +311,24 @@ class AudioOutputPopup(QWidget):
 
         self._target_x = target_x
         self._target_y = target_y
+        self._dismissed = False
+        self._install_dismiss_filter()
 
         if not animate:
-            self.setWindowOpacity(1.0)
+            self._render_opacity = 1.0
             self.move(target_x, target_y)
             self.show()
+            self.raise_()
+            self.activateWindow()
             return
 
-        self._start_y = target_y + 20
+        self._start_y = target_y + 18
         self._anim_step = 0
-        self.setWindowOpacity(0.05)
+        self._render_opacity = 0.25
         self.move(target_x, self._start_y)
         self.show()
+        self.raise_()
+        self.activateWindow()
         self._anim_timer.start()
 
     def _tick_slide_up(self):
@@ -239,25 +337,34 @@ class AudioOutputPopup(QWidget):
         ease = 1.0 - (1.0 - raw_t) ** 3
         cur_y = int(round(self._start_y + (self._target_y - self._start_y) * ease))
         self.move(self._target_x, cur_y)
-        self.setWindowOpacity(min(1.0, 0.12 + 0.88 * ease))
+        self._render_opacity = min(1.0, 0.25 + 0.75 * ease)
+        self.update()
         if raw_t >= 1.0:
             self._anim_timer.stop()
             self.move(self._target_x, self._target_y)
-            self.setWindowOpacity(1.0)
+            self._render_opacity = 1.0
+            self.update()
 
     def hideEvent(self, event):
         if hasattr(self, "_anim_timer") and self._anim_timer:
             self._anim_timer.stop()
+        self._remove_dismiss_filter()
         super().hideEvent(event)
 
     def closeEvent(self, event):
         if hasattr(self, "_anim_timer") and self._anim_timer:
             self._anim_timer.stop()
+        self._remove_dismiss_filter()
+        if not self._dismissed:
+            self._dismissed = True
+            self.closed.emit()
         super().closeEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self._render_opacity < 0.995:
+            painter.setOpacity(self._render_opacity)
 
         rect = QRectF(1.0, 1.0, self.width() - 2.0, self.height() - 2.0)
         painter.setBrush(QColor(15, 20, 34, 245))
@@ -268,4 +375,3 @@ class AudioOutputPopup(QWidget):
         painter.setPen(QPen(border_c, 1.2))
         painter.drawRoundedRect(rect, 12.0, 12.0)
         painter.end()
-

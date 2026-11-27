@@ -772,6 +772,7 @@ class LyricOverlayWindow(QWidget):
 
         # Bluetooth Headphone Battery & Quick Audio Output Switcher Pill (click to slide up speaker/BT selector!)
         self._audio_popup = None
+        self._audio_popup_closed_at = 0.0
         self.bt_pill = ClickableAudioPill()
         self.bt_pill.setObjectName("BtPill")
         self.bt_pill.clicked.connect(self.toggle_audio_output_popup)
@@ -1374,9 +1375,18 @@ class LyricOverlayWindow(QWidget):
 
     def toggle_audio_output_popup(self):
         """Slides up the Audio Output Device Selector directly above the bottom-left pill."""
-        if self._audio_popup and self._audio_popup.isVisible():
-            self._audio_popup.close()
+        if self._audio_popup is not None:
+            try:
+                was_vis = self._audio_popup.isVisible()
+                self._audio_popup.dismiss()
+            except Exception:
+                was_vis = False
             self._audio_popup = None
+            if was_vis:
+                return
+
+        # Debounce right after clicking bt_pill to dismiss an open popup (prevents close+reopen flicker)
+        if (time.monotonic() - getattr(self, "_audio_popup_closed_at", 0.0)) < 0.22:
             return
 
         bt_name = (self.current_bt_state.device_name or "") if (self.current_bt_state and self.current_bt_state.connected) else ""
@@ -1385,9 +1395,18 @@ class LyricOverlayWindow(QWidget):
 
         popup = AudioOutputPopup(devices, accent_hex=accent_hex, app_lang=self._lang(), parent=self)
         popup.device_selected.connect(self._on_audio_device_selected)
+        popup.closed.connect(self._on_audio_popup_closed)
         self._audio_popup = popup
         anchor = self.bt_pill.mapToGlobal(QPoint(0, 0))
         popup.show_slide_up(anchor, animate=True)
+
+    def _on_audio_popup_closed(self):
+        self._audio_popup = None
+        self._audio_popup_closed_at = time.monotonic()
+        # Reset any stale edge/drag state so hover cursors & buttons remain 100% responsive immediately
+        self.active_edge = None
+        self.drag_position = QPoint()
+        self.unsetCursor()
 
     def _on_audio_device_selected(self, dev_id: str):
         """Switches active Windows playback output immediately without toggling Bluetooth."""

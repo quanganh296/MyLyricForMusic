@@ -511,10 +511,13 @@ class RoundedVideoDisplay(QWidget):
         self.update()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-            event.accept()
-            return
+        if event.button() == Qt.MouseButton.LeftButton and self.isVisible() and self._render_opacity > 0.5:
+            # Only trigger play/pause when clicking strictly inside the visible 16:9 video frame
+            # (never on empty transparent margins or while dismissing a popup!)
+            if self.get_video_rect().contains(event.position()):
+                self.clicked.emit()
+                event.accept()
+                return
         super().mousePressEvent(event)
 
     def get_video_rect(self, w: int = None, h: int = None) -> QRectF:

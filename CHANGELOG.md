@@ -1,5 +1,15 @@
 # Lịch sử cập nhật LyricNow
 
+## v1.1.7
+- **Chấm dứt hoàn toàn lỗi `Failed to load Python DLL ...\_MEIxxxx\python311.dll` sau khi tự cập nhật:** Dọn sạch toàn bộ biến môi trường cũ của PyInstaller/Qt (`_PYI_*`, `_MEIPASS*`, đường dẫn `_MEI` trong `PATH`) kèm `PYINSTALLER_RESET_ENVIRONMENT=1` và tách nhóm tiến trình sạch khi khởi chạy bản mới; đồng thời sửa lỗi đóng gói manifest trên GitHub Actions (`manifestVersion="1.0"`) để bản release Windows luôn build chuẩn xác.
+- **Sửa triệt để lỗi treo con trỏ chuột & dừng video/âm thanh sau khi đóng bảng chọn thiết bị loa/tai nghe:**
+  - Chuyển bảng chọn loa (`AudioOutputPopup`) khỏi cơ chế `Qt.WindowType.Popup` chiếm chuột mức hệ điều hành sang cửa sổ trượt mượt `Tool` + làm mờ trực tiếp bằng painter (không gọi `setWindowOpacity` gây lỗi lớp trong suốt trên Windows) và kích hoạt mở bảng khi nhả chuột (`mouseReleaseEvent`).
+  - Nuốt gọn cú click ra ngoài để đóng bảng chọn mà không làm bấm nhầm vào khung video gây dừng nhạc, đồng thời giữ con trỏ dạng bấm (`PointingHandCursor`) và mọi nút hoạt động bình thường ngay lập tức.
+  - Thu hẹp vùng bấm tạm dừng video chỉ trong đúng khung hình 16:9 của video.
+- **Ổn định hiển thị % pin tai nghe Bluetooth (hết nhảy bất thường 90% → 60% → 50% → 90%):**
+  - Sửa bộ giải mã Google Fast Pair BLE theo đúng chuẩn khung TLV (`i += 1 + field_len`) để không đọc nhầm byte ngẫu nhiên làm % pin giả, và chỉ nhận gói BLE khớp đúng địa chỉ MAC hoặc tên tai nghe đang kết nối.
+  - Thêm bộ lọc chống nhiễu nhảy vọt (`_BatteryValueFilter`): cập nhật ngay bước pin bình thường (`<= 10%`), còn các bước nhảy bất thường (`> 10%`) phải ổn định qua 3 chu kỳ liên tiếp mới cập nhật.
+
 ## v1.1.6
 - **Kiểm tra cập nhật trực tiếp mỗi 60 giây khi app đang chạy:** Dùng cơ chế kiểm tra chuyển hướng nhẹ không bị giới hạn GitHub API; ngay khi bản phát hành mới sẵn sàng, ứng dụng đang mở sẽ lập tức đóng cửa sổ cũ (kể cả hộp thoại phụ) và bật ngay bảng yêu cầu cập nhật lên trên cùng.
 - **Giảm tối đa báo nhầm của Windows Defender / Antivirus:**

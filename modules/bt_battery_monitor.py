@@ -272,17 +272,21 @@ def scan_pnp_connected_headsets() -> list:
 # ---------------------------------------------------------------------------
 def decode_apple_airpods_adv(data: bytes) -> dict:
     """
-    Decode Apple Proximity Pairing (Company ID 0x004C, Type 0x07, Len 0x19) BLE payload.
-    Returns Left %, Right %, Case %, charging flags, and active connection status.
+    Decode Apple Proximity Pairing (Company ID 0x004C, Type 0x07, Len 0x19, exact 27-byte payload).
+    Follows the verified CAPod (DualApplePods) & AirPodsDesktop (AppleCP) bitfield specification,
+    including bit-6 in-case broadcaster XOR and optical in-ear detection so wearing ONLY the Right
+    AirPod always reports Right (never Left even if Left is sitting charged in the case!).
     """
-    if not data or len(data) < 10:
+    if not data or len(data) != 27:
         return None
     if data[0] != 0x07 or data[1] != 0x19:
         return None
 
-    # OpenPods / AirPodsDesktop protocol layout:
-    # Byte 5: status byte -> bit 5 (0x20, bit 1 of high nibble) indicates Left/Right flip
-    flip = (data[5] & 0x20) == 0
+    status = data[5]
+    # Bit 5 (0x20): 1 = Left pod is primary broadcaster, 0 = Right pod is primary broadcaster (values flipped)
+    flip = (status & 0x20) == 0
+    is_this_in_case = bool(status & 0x40)
+    both_in_case = bool(status & 0x04)
 
     high6 = (data[6] >> 4) & 0x0F
     low6 = data[6] & 0x0F
@@ -302,10 +306,22 @@ def decode_apple_airpods_adv(data: bytes) -> dict:
     left_charging = bool(charge_flags & (0x02 if flip else 0x01))
     right_charging = bool(charge_flags & (0x01 if flip else 0x02))
 
-    # Determine actively connected earbud(s):
-    # If one earbud is disconnected (raw=15 -> None) OR resting/charging inside the case while the other is in use
-    left_active = (left_batt is not None) and not (left_charging and right_batt is not None and not right_charging)
-    right_active = (right_batt is not None) and not (right_charging and left_batt is not None and not left_charging)
+    # In-ear optical sensor bits (bit 1 = broadcasting pod, bit 3 = other pod).
+    # Per CAPod DualApplePods: when the broadcasting pod itself is inside the case (bit 6),
+    # the in-ear mapping flips once more (flip ^ is_this_in_case).
+    in_ear_flip = flip ^ is_this_in_case
+    left_in_ear = (not left_charging) and bool(status & (0x08 if in_ear_flip else 0x02))
+    right_in_ear = (not right_charging) and bool(status & (0x02 if in_ear_flip else 0x08))
+
+    # Determine actively worn/connected earbud(s):
+    # 1. If optical in-ear sensor confirms one or both pods are physically in ear, trust it strictly!
+    # 2. Otherwise fall back to presence & charging state (for out-of-ear desk listening or sensor disabled).
+    if left_in_ear or right_in_ear:
+        left_active = (left_batt is not None) and left_in_ear
+        right_active = (right_batt is not None) and right_in_ear
+    else:
+        left_active = (left_batt is not None) and not (left_charging and right_batt is not None and not right_charging)
+        right_active = (right_batt is not None) and not (right_charging and left_batt is not None and not left_charging)
 
     return {
         "left_connected": left_active,
@@ -315,6 +331,10 @@ def decode_apple_airpods_adv(data: bytes) -> dict:
         "case_battery": case_batt,
         "left_charging": left_charging,
         "right_charging": right_charging,
+        "left_in_ear": left_in_ear,
+        "right_in_ear": right_in_ear,
+        "is_this_in_case": is_this_in_case,
+        "both_in_case": both_in_case,
         "source": "Apple BLE",
     }
 
@@ -530,17 +550,32 @@ class BluetoothBatteryWorker(QObject):
                     ble_addr = f"{args.bluetooth_address:012X}"
                     local_name = (args.advertisement.local_name or "").strip()
 
-                    # 1. Apple AirPods / Beats (Company ID 0x004C)
+                    # 1. Apple AirPods / Beats (Company ID 0x004C, exact 27-byte Proximity Pairing packet)
                     for m in args.advertisement.manufacturer_data:
-                        if m.company_id == 0x004C and m.data.length >= 10:
+                        if m.company_id == 0x004C and m.data.length == 27:
                             rdr = DataReader.from_buffer(m.data)
                             buf = bytearray(m.data.length)
                             rdr.read_bytes(buf)
                             decoded = decode_apple_airpods_adv(bytes(buf))
                             if decoded:
                                 prev = self._apple_ble_cache
-                                if not prev or (now - prev[0] > 8.0) or rssi >= prev[1] - 4:
+                                new_prio = (
+                                    1 if (decoded.get("left_in_ear") or decoded.get("right_in_ear")) else 0,
+                                    0 if decoded.get("is_this_in_case") else 1,
+                                    0 if decoded.get("both_in_case") else 1,
+                                )
+                                if not prev or (now - prev[0] > 8.0):
                                     self._apple_ble_cache = (now, rssi, ble_addr, local_name, decoded)
+                                else:
+                                    prev_dec = prev[4]
+                                    prev_prio = (
+                                        1 if (prev_dec.get("left_in_ear") or prev_dec.get("right_in_ear")) else 0,
+                                        0 if prev_dec.get("is_this_in_case") else 1,
+                                        0 if prev_dec.get("both_in_case") else 1,
+                                    )
+                                    # Prefer worn/out-of-case AirPod over an in-case pod's broadcast!
+                                    if new_prio > prev_prio or (new_prio == prev_prio and rssi >= prev[1] - 4):
+                                        self._apple_ble_cache = (now, rssi, ble_addr, local_name, decoded)
 
                     # 2. Google Fast Pair (Service Data 0x16 -> 2C FE)
                     for ds in args.advertisement.data_sections:

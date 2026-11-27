@@ -1,5 +1,9 @@
 # Lịch sử cập nhật LyricNow
 
+## v1.1.8
+- **Nhận diện chính xác tai nghe Trái / Phải đang đeo trên Apple AirPods (`AirPods 2` / `AirPods Pro`):** Nâng cấp bộ giải mã Apple Proximity Pairing theo đúng chuẩn 27 byte (`CAPod` / `AirPodsDesktop`), đọc chính xác cảm biến đeo tai (`in_ear`) cùng cờ đổi chiều khi tai còn lại nằm trong hộp sạc (`bit 6` XOR) và ưu tiên gói tin từ bên tai đang đeo — sửa triệt để tình trạng đeo tai bên **Phải** nhưng bị hiển thị thành **Trái**.
+- **Gộp trọn vẹn toàn bộ bản sửa ổn định từ v1.1.7:** Không còn cửa sổ lỗi `Failed to load Python DLL ...\_MEIxxxx\python311.dll` khi tự khởi động lại sau update, không kẹt con trỏ/dừng video khi đóng bảng chọn thiết bị loa/tai nghe, và lọc ổn định % pin Bluetooth hết nhảy 90%–60%–50%–90%.
+
 ## v1.1.7
 - **Chấm dứt hoàn toàn lỗi `Failed to load Python DLL ...\_MEIxxxx\python311.dll` sau khi tự cập nhật:** Dọn sạch toàn bộ biến môi trường cũ của PyInstaller/Qt (`_PYI_*`, `_MEIPASS*`, đường dẫn `_MEI` trong `PATH`) kèm `PYINSTALLER_RESET_ENVIRONMENT=1` và tách nhóm tiến trình sạch khi khởi chạy bản mới; đồng thời sửa lỗi đóng gói manifest trên GitHub Actions (`manifestVersion="1.0"`) để bản release Windows luôn build chuẩn xác.
 - **Sửa triệt để lỗi treo con trỏ chuột & dừng video/âm thanh sau khi đóng bảng chọn thiết bị loa/tai nghe:**

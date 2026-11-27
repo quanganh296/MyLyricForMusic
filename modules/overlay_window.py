@@ -14,7 +14,7 @@ from modules.theme_extractor import ThemeExtractor
 from modules.video_player import RoundedVideoDisplay
 from modules.lyrics_translator import TranslationWorker, has_non_latin_script
 from modules.version import APP_VERSION
-from modules.karaoke_widgets import ModeDropdownButton, KaraokeLyricWidget, SplitTransitionStage
+from modules.karaoke_widgets import ModeDropdownButton, KaraokeLyricWidget, SplitTransitionStage, SongTitleOverlay
 
 
 class ThemedGlassFrame(QFrame):
@@ -502,19 +502,7 @@ class LyricOverlayWindow(QWidget):
         # ---------------------------------------------------------
         self.top_bar = QHBoxLayout()
         self.top_bar.setSpacing(3)
-
-        self.lbl_song_icon = QLabel()
-        self.lbl_song_icon.setPixmap(IconFactory.create_pixmap("music", "#ffffff", 14))
-        self.lbl_song_icon.setFixedSize(16, 16)
-        self.top_bar.addWidget(self.lbl_song_icon)
-
-        self.lbl_song_info = QLabel("Đang chờ phát nhạc...")
-        self.lbl_song_info.setObjectName("SongInfoLabel")
-        self.lbl_song_info.setStyleSheet(
-            "font-weight: bold; font-size: 13px; color: #ffffff; padding-left: 3px; "
-            "font-family: 'Segoe UI', 'Yu Gothic UI', 'Meiryo UI', 'Malgun Gothic', 'Microsoft YaHei UI', sans-serif;"
-        )
-        self.top_bar.addWidget(self.lbl_song_info, stretch=1)
+        self.top_bar.addStretch(1)
 
         # Single Dropdown Mode Switcher (Mode 1: Video | Mode 2: Lyric | Mode 3: Karaoke)
         self.btn_mode_dropdown = ModeDropdownButton(self.container)
@@ -672,6 +660,11 @@ class LyricOverlayWindow(QWidget):
         self.btn_karaoke_video.setVisible(False)
         self.btn_karaoke_video.raise_()
 
+        # Floating animated Song Title (underneath Video when Video is visible; Top-Center above lyrics otherwise)
+        self.lbl_song_info = SongTitleOverlay(self.container)
+        self.lbl_song_info.setText("Đang chờ phát nhạc...")
+        self.lbl_song_info.raise_()
+
         # ---------------------------------------------------------
         # 3. Media Controls Bar & Volume Control & Resizable Grip
         # ---------------------------------------------------------
@@ -804,6 +797,74 @@ class LyricOverlayWindow(QWidget):
         self.btn_karaoke_video.setVisible(True)
         self.btn_karaoke_video.raise_()
 
+    def _apply_lyrics_top_margin(self):
+        """Reserves exact vertical top margin for floating [Video] pill & top-centered song title."""
+        if not hasattr(self, "lyrics_box"):
+            return
+        if self.is_compact:
+            top_m = 2
+        elif self.display_mode == 1:
+            top_m = 2
+        elif self.display_mode == 2:
+            top_m = 28
+        else:
+            # Mode 3: Video ON reserves room for [Video] pill; Video OFF reserves [Video] pill + centered title
+            top_m = 26 if self.karaoke_show_video else 58
+        self.lyrics_box.setContentsMargins(4, top_m, 4, 2)
+
+    def _compute_song_title_rect(self) -> QRect:
+        """
+        Computes exact destination geometry of the song title in container coordinates:
+        - Video visible (Mode 1 or Mode 3 Video ON): centered directly underneath the 16:9 Video box.
+        - Video hidden (Mode 2 or Mode 3 Video OFF): centered at the top above the lyrics.
+        """
+        cw = self.container.width()
+        ch = self.container.height()
+        if cw <= 40 or ch <= 40:
+            return QRect()
+
+        stage_g = self.split_stage.geometry()
+        if stage_g.width() <= 40 or stage_g.height() <= 30:
+            stage_g = QRect(16, 44, max(120, cw - 32), max(60, ch - 92))
+
+        has_video = (self.display_mode == 1) or (self.display_mode == 3 and self.karaoke_show_video)
+        if has_video:
+            _, right_r, _ = self.split_stage._split_rects()
+            vr = self.video_display.get_video_rect(right_r.width(), right_r.height())
+            th = 28
+            tx = stage_g.x() + right_r.x() + int(round(vr.x()))
+            ty = stage_g.y() + right_r.y() + int(round(vr.y() + vr.height())) + 6
+            tw = max(140, int(round(vr.width())))
+            max_y = stage_g.y() + stage_g.height() - th
+            if ty > max_y:
+                ty = max(stage_g.y(), max_y)
+            return QRect(tx, ty, tw, th)
+
+        # No video -> Top-Center cleanly above the lyrics!
+        th = 26
+        tx = stage_g.x() + 12
+        tw = max(160, stage_g.width() - 24)
+        if self.display_mode == 3:
+            kv_bottom = self.btn_karaoke_video.geometry().bottom() if self.btn_karaoke_video.isVisible() else (stage_g.y() + 21)
+            ty = max(stage_g.y() + 25, kv_bottom + 6)
+        else:
+            ty = max(stage_g.y() - 2, 36)
+        return QRect(tx, ty, tw, th)
+
+    def _update_song_title_position(self, animate: bool = False):
+        if not hasattr(self, "lbl_song_info"):
+            return
+        if self.is_compact:
+            self.lbl_song_info.setVisible(False)
+            return
+        self.lbl_song_info.setVisible(True)
+        target = self._compute_song_title_rect()
+        if target.isValid() and target.width() > 4:
+            self.lbl_song_info.move_to_rect(target, animate=animate)
+            self.lbl_song_info.raise_()
+            if self.btn_karaoke_video.isVisible():
+                self.btn_karaoke_video.raise_()
+
     def _update_karaoke_video_btn_style(self, accent_hex: str = None):
         if not hasattr(self, "btn_karaoke_video"):
             return
@@ -823,10 +884,12 @@ class LyricOverlayWindow(QWidget):
         self.karaoke_show_video = not self.karaoke_show_video
         self.settings["karaoke_show_video"] = self.karaoke_show_video
         self._update_karaoke_video_btn_style(self.adaptive_palette.get("accent_hex", "#38bdf8"))
+        self._apply_lyrics_top_margin()
         if self.karaoke_show_video:
             self._trigger_track_media_load()
-        # Animate first; stop video decoding ONLY after fade-out finishes inside _on_split_anim_finished!
+        # Animate video/lyrics AND glide song title simultaneously (under video <-> top center)!
         self.split_stage.set_video_visible(self.karaoke_show_video, animate=True)
+        self._update_song_title_position(animate=True)
         self.settings_autosave.emit(self.settings)
 
     def _on_split_anim_progress(self, progress: float):
@@ -852,12 +915,18 @@ class LyricOverlayWindow(QWidget):
             # Stop MP4 video decoding AFTER fade-out animation completes to free CPU while preserving blurred backdrop
             self.video_display.stop_video(clear_artwork=False)
         self._position_karaoke_video_btn()
+        if not getattr(self.lbl_song_info, "_animating", False):
+            self._update_song_title_position(animate=False)
         self._fit_active_lyric_fonts()
 
     def set_display_mode(self, mode: int):
         mode = mode if mode in (1, 2, 3) else 1
         if mode == self.display_mode:
             return
+
+        # Remember previous song-title geometry so it visibly glides to its new home (under video <-> top center)!
+        prev_title_rect = QRect(self.lbl_song_info.geometry()) if hasattr(self, "lbl_song_info") else QRect()
+        prev_has_video = (self.display_mode == 1) or (self.display_mode == 3 and self.karaoke_show_video)
 
         # Exit fullscreen before switching to Mode 2 (Modes 1 & 3 both support fullscreen)
         if self.is_fullscreen and mode == 2:
@@ -879,6 +948,7 @@ class LyricOverlayWindow(QWidget):
 
         self.display_mode = mode
         self.settings["display_mode"] = mode
+        next_has_video = (mode == 1) or (mode == 3 and self.karaoke_show_video)
 
         if self.display_mode in (1, 3) and self.is_compact:
             self.toggle_compact()
@@ -889,6 +959,19 @@ class LyricOverlayWindow(QWidget):
         self._apply_mode_layout(resize_window=True)
         self.apply_settings(self.settings)
         self.settings_autosave.emit(self.settings)
+
+        # Smoothly glide song title between Under-Video and Top-Center when switching modes!
+        if prev_has_video != next_has_video and prev_title_rect.width() > 20:
+            def _kick_title_glide(old_r=prev_title_rect):
+                self._position_karaoke_video_btn()
+                cw = max(160, self.container.width())
+                ch = max(100, self.container.height())
+                start_w = min(old_r.width(), cw - 24)
+                start_x = max(8, min(old_r.x(), cw - start_w - 8))
+                start_y = max(36, min(old_r.y(), ch - 46))
+                self.lbl_song_info.setGeometry(start_x, start_y, start_w, old_r.height())
+                self._update_song_title_position(animate=True)
+            QTimer.singleShot(0, _kick_title_glide)
 
     def paintEvent(self, event):
         # Clear transparent backing store cleanly and draw lightweight soft outer shadow when windowed
@@ -950,6 +1033,7 @@ class LyricOverlayWindow(QWidget):
         self.container.update()
         self.update()
         QTimer.singleShot(0, self._position_karaoke_video_btn)
+        QTimer.singleShot(0, lambda: self._update_song_title_position(animate=False))
         QTimer.singleShot(20, self.repaint)
 
     def keyPressEvent(self, event):
@@ -988,8 +1072,8 @@ class LyricOverlayWindow(QWidget):
         if hasattr(self, "sync_timer") and self.sync_timer:
             self.sync_timer.setInterval(25 if is_m3 else 50)
 
-        # Give lyrics extra top breathing room in Mode 3 so floating "Video" pill never touches top lyrics
-        self.lyrics_box.setContentsMargins(4, 26 if is_m3 else 2, 4, 2)
+        # Reserve top breathing room for floating [Video] pill & top-centered song title
+        self._apply_lyrics_top_margin()
 
         # Apply instant stage layout on mode change (smooth animation is for Mode 3 Video toggle!)
         self.split_stage.set_video_visible(show_video_now, animate=False)
@@ -1012,7 +1096,7 @@ class LyricOverlayWindow(QWidget):
                     self.resize(target_w, target_h)
             else:
                 target_w = max(360, int(self.settings.get("win_w", 680)))
-                target_h = max(120, int(self.settings.get("win_h", 195)))
+                target_h = max(140, int(self.settings.get("win_h", 220)))
                 self.setMinimumSize(280, 68)
                 self.video_display.stop_video(clear_artwork=False)
                 if resize_window:
@@ -1022,9 +1106,10 @@ class LyricOverlayWindow(QWidget):
 
         self._trigger_track_media_load()
 
-        # Refresh lyric line visibility, text & karaoke toggle button placement
+        # Refresh lyric line visibility, text & floating overlay positions
         self._refresh_visible_lines()
         QTimer.singleShot(0, self._position_karaoke_video_btn)
+        QTimer.singleShot(0, lambda: self._update_song_title_position(animate=False))
 
     def _reset_track_artwork(self, clear_display: bool = True):
         """Clears previous track's blurred background & adaptive palette cleanly on song change."""
@@ -1329,9 +1414,11 @@ class LyricOverlayWindow(QWidget):
         self._active_font_stack = font_stack
         self._active_font_family = font_family
 
-        # Update Mode Dropdown & Karaoke Video toggle pill with live adaptive accent color
+        # Update Mode Dropdown, Karaoke Video toggle pill & floating Song Title theme
         self.btn_mode_dropdown.set_mode_state(self.display_mode, accent_hex)
         self._update_karaoke_video_btn_style(accent_hex)
+        if hasattr(self, "lbl_song_info") and hasattr(self.lbl_song_info, "set_theme"):
+            self.lbl_song_info.set_theme(accent_hex, 15 if (is_stage_mode and self.is_fullscreen) else 13)
         if hasattr(self, "karaoke_widget"):
             self.karaoke_widget.set_style(families, active_font_size, color_hi)
             if not getattr(self.split_stage, "_animating", False):
@@ -1548,8 +1635,9 @@ class LyricOverlayWindow(QWidget):
             lw = (self.width() - 56) if is_full_w else max(260, (self.width() - 72) * 12 // 21)
         if lh <= 60:
             lh = max(84, self.height() - 108)
-        avail_w = max(200, lw - 14)
-        avail_h = max(72, lh - 4)
+        m = self.lyrics_box.contentsMargins()
+        avail_w = max(200, lw - m.left() - m.right() - 10)
+        avail_h = max(62, lh - m.top() - m.bottom() - 4)
 
         orig_text = self.lbl_active.text() or ""
         rm_vis = (not self.lbl_active_romaji.isHidden()) and bool(self.lbl_active_romaji.text())
@@ -2247,6 +2335,8 @@ class LyricOverlayWindow(QWidget):
             self.btn_compact.set_kind("maximize")
             self.lbl_active_romaji.setVisible(False)
             self.lbl_active_trans.setVisible(False)
+            self._apply_lyrics_top_margin()
+            self._update_song_title_position(animate=False)
             self.resize(self.width(), 90)
         else:
             self.lbl_version.setVisible(True)
@@ -2262,8 +2352,10 @@ class LyricOverlayWindow(QWidget):
             self.btn_next.setVisible(True)
             self.vol_widget.setVisible(True)
             self.btn_compact.set_kind("restore")
+            self._apply_lyrics_top_margin()
             self._update_active_translation_label(self._effective_display_index())
-            self.resize(self.width(), max(160, int(self.settings.get("win_h", 195))))
+            self.resize(self.width(), max(180, int(self.settings.get("win_h", 220))))
+            QTimer.singleShot(0, lambda: self._update_song_title_position(animate=False))
 
     # ---------------------------------------------------------
     # Mouse Edge Resize & Dragging System
@@ -2392,6 +2484,7 @@ class LyricOverlayWindow(QWidget):
         super().showEvent(event)
         QTimer.singleShot(0, self._fit_active_lyric_fonts)
         QTimer.singleShot(0, self._position_karaoke_video_btn)
+        QTimer.singleShot(0, lambda: self._update_song_title_position(animate=False))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2406,6 +2499,8 @@ class LyricOverlayWindow(QWidget):
                 self.settings["win_w"] = self.width()
                 self.settings["win_h"] = self.height()
         self._position_karaoke_video_btn()
+        if hasattr(self, "lbl_song_info") and not getattr(self.lbl_song_info, "_animating", False):
+            self._update_song_title_position(animate=False)
         if hasattr(self, "lbl_active_trans") and hasattr(self, "lbl_active_romaji"):
             has_sub = bool(self.lbl_active_trans.text() or self.lbl_active_romaji.text()) and not self.is_compact and bool(self.settings.get("enable_translation", True))
             self._sync_surrounding_lines_visibility(has_foreign_sub=has_sub)

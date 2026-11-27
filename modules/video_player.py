@@ -363,6 +363,24 @@ class RoundedVideoDisplay(QWidget):
             return
         super().mousePressEvent(event)
 
+    def get_video_rect(self, w: int = None, h: int = None) -> QRectF:
+        """Returns the exact 16:9 video frame rect, reserving 34px below for the song title."""
+        w = self.width() if w is None else w
+        h = self.height() if h is None else h
+        title_reserve = 34
+        avail_h = max(48, h - title_reserve)
+        target_ratio = 16.0 / 9.0
+        if w / max(1, avail_h) > target_ratio:
+            box_h = max(36, avail_h - 4)
+            box_w = int(box_h * target_ratio)
+        else:
+            box_w = max(64, w - 4)
+            box_h = int(box_w / target_ratio)
+
+        x = (w - box_w) // 2
+        y = max(2, (h - (box_h + title_reserve)) // 2)
+        return QRectF(x, y, box_w, box_h)
+
     def paintEvent(self, event):
         if self._render_opacity <= 0.005:
             return
@@ -372,19 +390,11 @@ class RoundedVideoDisplay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        w, h = self.width(), self.height()
-        # Fit a clean 16:9 box inside available rect
-        target_ratio = 16.0 / 9.0
-        if w / max(1, h) > target_ratio:
-            box_h = h - 4
-            box_w = int(box_h * target_ratio)
-        else:
-            box_w = w - 4
-            box_h = int(box_w / target_ratio)
-
-        x = (w - box_w) // 2
-        y = (h - box_h) // 2
-        rect = QRectF(x, y, box_w, box_h)
+        rect = self.get_video_rect()
+        x = int(rect.x())
+        y = int(rect.y())
+        box_w = int(rect.width())
+        box_h = int(rect.height())
 
         clip_path = QPainterPath()
         clip_path.addRoundedRect(rect, 12.0, 12.0)

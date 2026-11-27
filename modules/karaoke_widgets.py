@@ -700,3 +700,130 @@ class SplitTransitionStage(QWidget):
                 self.video_display.setGeometry(right_r)
             else:
                 self.lyrics_widget.setGeometry(full_r)
+
+
+class SongTitleOverlay(QWidget):
+    """
+    Floating animated song title label:
+    - Sits centered directly underneath the Video frame whenever Video is visible.
+    - Smoothly glides (60 FPS OutCubic) up to Top-Center above the lyrics whenever Video is hidden
+      (Mode 2 Lyric-Only or Mode 3 Karaoke with Video OFF).
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._text = "Đang chờ phát nhạc..."
+        self._accent_hex = "#38bdf8"
+        self._font_px = 13
+        self._icon_pix = IconFactory.create_pixmap("music", "#ffffff", 13)
+        self._animating = False
+        self._start_rect = QRect()
+        self._target_rect = QRect()
+        self._anim_step = 0
+        self._anim_total_steps = 20  # ~320ms at 16ms/frame (~60 FPS)
+
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(16)
+        self._anim_timer.timeout.connect(self._tick_anim)
+
+    def text(self) -> str:
+        return self._text
+
+    def setText(self, text: str):
+        text = text or ""
+        if text != self._text:
+            self._text = text
+            self.update()
+
+    def set_theme(self, accent_hex: str = "#38bdf8", font_px: int = 13):
+        changed = (accent_hex != self._accent_hex) or (font_px != self._font_px)
+        self._accent_hex = accent_hex or "#38bdf8"
+        self._font_px = max(11, int(font_px))
+        if changed:
+            self._icon_pix = IconFactory.create_pixmap("music", self._accent_hex, max(12, self._font_px))
+            self.update()
+
+    def move_to_rect(self, target: QRect, animate: bool = False):
+        if target.width() <= 4 or target.height() <= 4:
+            return
+        self._target_rect = QRect(target)
+        if not animate or self.geometry().width() <= 4 or self.geometry() == target:
+            self._anim_timer.stop()
+            self._animating = False
+            self.setGeometry(target)
+            self.update()
+            return
+
+        self._start_rect = QRect(self.geometry())
+        self._anim_step = 0
+        self._animating = True
+        self._tick_anim()
+        self._anim_timer.start()
+
+    def _tick_anim(self):
+        self._anim_step += 1
+        raw_t = min(1.0, self._anim_step / float(self._anim_total_steps))
+        ease = 1.0 - (1.0 - raw_t) ** 3
+
+        s = self._start_rect
+        t = self._target_rect
+        nx = int(round(s.x() + (t.x() - s.x()) * ease))
+        ny = int(round(s.y() + (t.y() - s.y()) * ease))
+        nw = int(round(s.width() + (t.width() - s.width()) * ease))
+        nh = int(round(s.height() + (t.height() - s.height()) * ease))
+        self.setGeometry(nx, ny, nw, nh)
+        self.update()
+
+        if raw_t >= 1.0:
+            self._anim_timer.stop()
+            self._animating = False
+            self.setGeometry(self._target_rect)
+            self.update()
+
+    def paintEvent(self, event):
+        if not self._text:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+
+        font = QFont()
+        font.setFamilies([
+            "Segoe UI", "Yu Gothic UI", "Meiryo UI",
+            "Malgun Gothic", "Microsoft YaHei UI", "Leelawadee UI"
+        ])
+        font.setPixelSize(self._font_px)
+        font.setBold(True)
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+
+        w = self.width()
+        h = self.height()
+        icon_w = self._icon_pix.width() if not self._icon_pix.isNull() else 0
+        icon_h = self._icon_pix.height() if not self._icon_pix.isNull() else 0
+        gap = 6 if icon_w > 0 else 0
+
+        max_text_w = max(24, w - icon_w - gap - 8)
+        elided = fm.elidedText(self._text, Qt.TextElideMode.ElideRight, max_text_w)
+        text_w = fm.horizontalAdvance(elided)
+        total_w = icon_w + gap + text_w
+
+        start_x = max(4.0, (w - total_w) / 2.0)
+        baseline = (h + fm.ascent() - fm.descent()) / 2.0
+
+        if icon_w > 0:
+            iy = int(round((h - icon_h) / 2.0))
+            painter.drawPixmap(int(round(start_x)), iy, self._icon_pix)
+
+        tx = int(round(start_x + icon_w + gap))
+        by = int(round(baseline))
+
+        # Crisp dark shadow for legibility over any blurred backdrop
+        painter.setPen(QColor(0, 0, 0, 125))
+        painter.drawText(tx + 1, by + 1, elided)
+        painter.setPen(QColor(255, 255, 255, 242))
+        painter.drawText(tx, by, elided)
+        painter.end()

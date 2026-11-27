@@ -4,7 +4,7 @@ try:
         QGraphicsDropShadowEffect, QFrame, QDialog, QLineEdit, QListWidget,
         QListWidgetItem, QMessageBox, QComboBox, QSpinBox, QDoubleSpinBox,
         QSlider, QGroupBox, QFormLayout, QSystemTrayIcon, QMenu, QSizeGrip,
-        QTabWidget, QTextEdit, QColorDialog, QSizePolicy
+        QTabWidget, QTextEdit, QColorDialog, QSizePolicy, QProgressBar
     )
     from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal as Signal, QThread, QObject, QUrl, QRectF, QRect, QSize
     from PyQt6.QtGui import QColor, QFont, QFontMetrics, QCursor, QPixmap, QImage, QPainter, QIcon, QPen, QBrush, QPainterPath
@@ -21,7 +21,7 @@ except ImportError:
         QGraphicsDropShadowEffect, QFrame, QDialog, QLineEdit, QListWidget,
         QListWidgetItem, QMessageBox, QComboBox, QSpinBox, QDoubleSpinBox,
         QSlider, QGroupBox, QFormLayout, QSystemTrayIcon, QMenu, QSizeGrip,
-        QTabWidget, QTextEdit, QColorDialog, QSizePolicy
+        QTabWidget, QTextEdit, QColorDialog, QSizePolicy, QProgressBar
     )
     from PySide6.QtCore import Qt, QPoint, QTimer, Signal, QThread, QObject, QUrl, QRectF, QRect, QSize
     from PySide6.QtGui import QColor, QFont, QFontMetrics, QCursor, QPixmap, QImage, QPainter, QIcon, QPen, QBrush, QPainterPath

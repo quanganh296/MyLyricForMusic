@@ -1,5 +1,9 @@
 # Lịch sử cập nhật LyricNow
 
+## v1.1.2
+- **Hiển thị tên bài hát thông minh & tự di chuyển mượt mà:** Khi có khung **Video** (Mode 1 hoặc Mode 3 bật Video), tên bài hát tự động hiển thị căn giữa ngay bên dưới khung video; khi chuyển sang chế độ chỉ có lời (**Mode 2 Lyric** hoặc **Mode 3 tắt Video**), tên bài hát tự trượt mượt lên đầu cửa sổ ở chính giữa (`Center`) còn phần lời nhạc nằm gọn phía dưới.
+- **Kiểm tra & bắt buộc cập nhật khi có phiên bản mới:** Ứng dụng tự động kiểm tra bản phát hành mới nhất từ GitHub; nếu đang chạy phiên bản cũ sẽ hiển thị thông báo bắt buộc cập nhật (kèm danh sách thay đổi và nút tải/cập nhật tự động 1 chạm) thay vì cho dùng tiếp bản cũ.
+
 ## v1.1.1
 - **Nút chọn chế độ dạng menu thả xuống (Dropdown):** Gộp nút chọn chế độ thành 1 ô gọn đẹp có mũi tên chỉ xuống bên phải, bấm vào sẽ thả danh sách chọn giữa **Video (Mode 1)**, **Lyric (Mode 2)** và **Karaoke (Mode 3)**.
 - **Thêm Mode 3 — Hát Karaoke sáng chữ từng từ khớp nhịp:** Chữ chưa hát luôn nhạt màu, hát tới từ nào sẽ sáng màu quét mượt từ trái sang phải theo đúng nhịp bài hát — tự động nhận diện nhịp chậm (ballad) lẫn nhịp nhanh (rap) và hỗ trợ dấu phẩy/ngắt nghỉ tự nhiên cũng như LRC timestamp từng từ.

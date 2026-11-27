@@ -21,7 +21,7 @@ try:
 except Exception as e:
     print(f"[WinAPI Warning] Could not set AppUserModelID: {e}")
 
-from modules.qt_compat import QApplication, QThread, QIcon
+from modules.qt_compat import QApplication, QThread, QIcon, QTimer
 from modules.cache_manager import LyricsCache
 from modules.lyrics_provider import LyricsProvider
 from modules.media_listener import MediaListenerWorker
@@ -29,6 +29,8 @@ from modules.bt_battery_monitor import BluetoothBatteryWorker
 from modules.overlay_window import LyricOverlayWindow
 from modules.settings_dialog import SettingsDialog
 from modules.search_dialog import SearchDialog
+from modules.version import APP_VERSION
+from modules.updater import UpdateCheckWorker, MandatoryUpdateDialog
 
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
@@ -126,6 +128,48 @@ class LyricOverlayApp:
         self.media_thread.start()
         self.bt_thread.start()
 
+        # 4. Mandatory Update Gate: check on startup + every 30 minutes
+        self._update_enforced = False
+        self._update_worker = None
+        self._exiting = False
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.check_for_updates)
+        self.update_timer.start(30 * 60 * 1000)
+        QTimer.singleShot(350, self.check_for_updates)
+
+    def check_for_updates(self):
+        if self._update_enforced or self._exiting:
+            return
+        if self._update_worker and self._update_worker.isRunning():
+            return
+        self._update_worker = UpdateCheckWorker(APP_VERSION, timeout=5.0)
+        self._update_worker.update_required.connect(self.on_mandatory_update_required)
+        self._update_worker.start()
+
+    def on_mandatory_update_required(self, release_info: dict):
+        if self._update_enforced or self._exiting:
+            return
+        self._update_enforced = True
+        if hasattr(self, "update_timer") and self.update_timer:
+            self.update_timer.stop()
+
+        # Immediately block & hide the outdated app so it cannot be used without updating!
+        try:
+            if hasattr(self.overlay, "sync_timer") and self.overlay.sync_timer:
+                self.overlay.sync_timer.stop()
+            if hasattr(self.overlay, "vol_sync_timer") and self.overlay.vol_sync_timer:
+                self.overlay.vol_sync_timer.stop()
+            if hasattr(self.overlay, "video_display") and self.overlay.video_display:
+                self.overlay.video_display.stop_video(clear_artwork=True)
+            self.overlay.hide()
+        except Exception:
+            pass
+
+        dlg = MandatoryUpdateDialog(APP_VERSION, release_info)
+        dlg.exec()
+        # Regardless of whether auto-update started or user closed dialog, exit old version!
+        self.exit_app()
+
     def open_settings(self):
         dlg = SettingsDialog(self.settings, self.overlay)
         dlg.settings_changed.connect(self.on_settings_updated)
@@ -152,7 +196,14 @@ class LyricOverlayApp:
         dlg.exec()
 
     def exit_app(self):
+        if getattr(self, "_exiting", False):
+            return
+        self._exiting = True
         print("[App] Exiting LyricOverLay...")
+        if hasattr(self, "update_timer") and self.update_timer:
+            self.update_timer.stop()
+        if getattr(self, "_update_worker", None) and self._update_worker.isRunning():
+            self._update_worker.wait(500)
         # Update settings with current window coordinates (ignore fullscreen geometry)
         if not self.overlay.is_fullscreen:
             self.settings["win_x"] = self.overlay.x()

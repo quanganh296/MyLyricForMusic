@@ -186,10 +186,11 @@ class SettingsDialog(QDialog):
         self.combo_mode = QComboBox()
         self.combo_mode.addItems([
             "Mode 1: Video bên phải + Lyric bên trái (Nền mờ & Màu tự động)",
-            "Mode 2: Chỉ hiện Lyric ở giữa (Nền mờ & Màu tự động theo video)"
+            "Mode 2: Chỉ hiện Lyric ở giữa (Nền mờ & Màu tự động theo video)",
+            "Mode 3: Hát Karaoke (Chữ sáng từng từ khớp nhịp + bật/tắt Video)"
         ])
         curr_mode = int(self.settings.get("display_mode", 1))
-        self.combo_mode.setCurrentIndex(0 if curr_mode == 1 else 1)
+        self.combo_mode.setCurrentIndex(curr_mode - 1 if curr_mode in (1, 2, 3) else 0)
         form_lines.addRow("Chế độ giao diện:", self.combo_mode)
 
         self.combo_lines = QComboBox()
@@ -486,7 +487,7 @@ class SettingsDialog(QDialog):
         self.settings["color_highlight"] = self.curr_color_hex
         self.settings["color_sub"] = "#ffffff"
         self.settings["bg_opacity"] = max(0.15, self.slider_opacity.value() / 100.0)
-        self.settings["display_mode"] = 1 if self.combo_mode.currentIndex() == 0 else 2
+        self.settings["display_mode"] = self.combo_mode.currentIndex() + 1
         self.settings["line_mode"] = self.combo_lines.currentIndex()
         self.settings["align_mode"] = self.combo_align.currentIndex()
         self.settings["sync_offset"] = self.spin_offset.value()

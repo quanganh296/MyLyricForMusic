@@ -47,6 +47,8 @@ class IconFactory:
         "battery_1": "fa5s.battery-quarter",
         "battery_0": "fa5s.battery-empty",
         "language": "fa5s.language",
+        "microphone": "fa5s.microphone",
+        "chevron_down": "fa5s.chevron-down",
     }
 
     @classmethod

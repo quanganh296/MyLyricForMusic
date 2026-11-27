@@ -14,6 +14,7 @@ from modules.theme_extractor import ThemeExtractor
 from modules.video_player import RoundedVideoDisplay
 from modules.lyrics_translator import TranslationWorker, has_non_latin_script
 from modules.version import APP_VERSION
+from modules.karaoke_widgets import ModeDropdownButton, KaraokeLyricWidget, SplitTransitionStage
 
 
 class ThemedGlassFrame(QFrame):
@@ -381,14 +382,18 @@ class LyricOverlayWindow(QWidget):
 
         # Mode state: 1 = Video (Right) + Lyrics (Left) + Blurred BG + Adaptive Color
         #             2 = Lyric-Only Centered + Zoom In/Out & Resize
-        self.display_mode = int(self.settings.get("display_mode", 2))
-        if self.display_mode not in (1, 2):
-            self.display_mode = 2
+        #             3 = Karaoke (Word-by-Word highlight + toggleable Video with smooth slide transition)
+        self.display_mode = int(self.settings.get("display_mode", 1))
+        if self.display_mode not in (1, 2, 3):
+            self.display_mode = 1
+        self.karaoke_show_video = bool(self.settings.get("karaoke_show_video", True))
+        self._karaoke_align_p = 1.0 if (self.display_mode == 3 and not self.karaoke_show_video) else 0.0
 
         # State variables
         self.is_locked = False
         self.is_compact = False
         self.is_fullscreen = False
+        self._suppress_resize_save = False
         self.normal_mode1_geom = None
         self.drag_position = QPoint()
         self.active_edge = None
@@ -417,10 +422,10 @@ class LyricOverlayWindow(QWidget):
         self.apply_settings(self.settings)
         self._apply_mode_layout(resize_window=False)
 
-        # Sync timer for high-frequency lyric & video updating (50ms interval)
+        # Sync timer for high-frequency lyric, karaoke wipe & video updating (25ms in Karaoke Mode, 50ms otherwise)
         self.sync_timer = QTimer(self)
         self.sync_timer.timeout.connect(self.update_lyric_display)
-        self.sync_timer.start(50)
+        self.sync_timer.start(25 if self.display_mode == 3 else 50)
 
         # Live Windows active audio output device & volume sync timer (450ms interval)
         self._last_vol_state = None
@@ -468,6 +473,9 @@ class LyricOverlayWindow(QWidget):
         if self.display_mode == 1:
             init_w = self.settings.get("mode1_w", 940)
             init_h = self.settings.get("mode1_h", 430)
+        elif self.display_mode == 3:
+            init_w = self.settings.get("mode3_w", self.settings.get("mode1_w", 940))
+            init_h = self.settings.get("mode3_h", self.settings.get("mode1_h", 430))
         else:
             init_w = self.settings.get("win_w", 680)
             init_h = self.settings.get("win_h", 195)
@@ -508,23 +516,10 @@ class LyricOverlayWindow(QWidget):
         )
         self.top_bar.addWidget(self.lbl_song_info, stretch=1)
 
-        # Segmented Mode Switcher: Mode 1 (Video + Lyric) | Mode 2 (Lyric Only)
-        self.btn_mode1 = QPushButton(" Video")
-        self.btn_mode1.setIcon(IconFactory.create_icon("film", "#ffffff", 13))
-        self.btn_mode1.setToolTip("Mode 1: Video bên phải + Lyric bên trái (nền mờ & màu tự động theo video)")
-        self.btn_mode1.setFixedHeight(26)
-        self.btn_mode1.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_mode1.clicked.connect(lambda: self.set_display_mode(1))
-
-        self.btn_mode2 = QPushButton(" Lyric")
-        self.btn_mode2.setIcon(IconFactory.create_icon("align_center", "#ffffff", 13))
-        self.btn_mode2.setToolTip("Mode 2: Chỉ hiện Lyric ở giữa tab (nền mờ & màu tự động theo video, thu phóng linh hoạt)")
-        self.btn_mode2.setFixedHeight(26)
-        self.btn_mode2.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_mode2.clicked.connect(lambda: self.set_display_mode(2))
-
-        self.top_bar.addWidget(self.btn_mode1)
-        self.top_bar.addWidget(self.btn_mode2)
+        # Single Dropdown Mode Switcher (Mode 1: Video | Mode 2: Lyric | Mode 3: Karaoke)
+        self.btn_mode_dropdown = ModeDropdownButton(self.container)
+        self.btn_mode_dropdown.mode_selected.connect(self.set_display_mode)
+        self.top_bar.addWidget(self.btn_mode_dropdown)
 
         # Mode 2 Zoom Out / Zoom In Controls
         self.btn_zoom_out = ToolbarIconButton("zoom_out", "#cbd5e1", "#ffffff")
@@ -592,13 +587,8 @@ class LyricOverlayWindow(QWidget):
         layout.addLayout(self.top_bar)
 
         # ---------------------------------------------------------
-        # 2. Main Split Content Area (Left: Lyrics | Right: Video in Mode 1)
+        # 2. Main Animated Split Stage (Left/Center: Lyrics | Right: Video)
         # ---------------------------------------------------------
-        self.content_row = QHBoxLayout()
-        self.content_row.setSpacing(16)
-        self.content_row.setContentsMargins(0, 4, 0, 4)
-
-        # Left / Center Lyrics Container
         self.lyrics_widget = QWidget()
         self.lyrics_widget.setMouseTracking(True)
         self.lyrics_box = QVBoxLayout(self.lyrics_widget)
@@ -618,6 +608,10 @@ class LyricOverlayWindow(QWidget):
         self.lbl_active = QLabel("Chờ bài hát từ YouTube, Spotify, Chrome, Edge...")
         self.lbl_active.setObjectName("ActiveLyric")
         self.lbl_active.setWordWrap(True)
+
+        self.karaoke_widget = KaraokeLyricWidget(self.lyrics_widget)
+        self.karaoke_widget.set_static_text("Chờ bài hát từ YouTube, Spotify, Chrome, Edge...")
+        self.karaoke_widget.setVisible(False)
 
         self.lbl_active_romaji = QLabel("")
         self.lbl_active_romaji.setObjectName("ActiveRomaji")
@@ -648,22 +642,35 @@ class LyricOverlayWindow(QWidget):
         self.lyrics_box.addWidget(self.lbl_prev2)
         self.lyrics_box.addWidget(self.lbl_prev)
         self.lyrics_box.addWidget(self.lbl_active)
+        self.lyrics_box.addWidget(self.karaoke_widget)
         self.lyrics_box.addWidget(self.lbl_active_romaji)
         self.lyrics_box.addWidget(self.lbl_active_trans)
         self.lyrics_box.addWidget(self.lbl_next)
         self.lyrics_box.addWidget(self.lbl_next2)
         self.lyrics_box.addStretch(1)
 
-        self.content_row.addWidget(self.lyrics_widget, stretch=12)
-
-        # Right Video Pane (Mode 1)
+        # Right Video Pane (Mode 1 & Mode 3 Karaoke when Video is ON)
         self.video_display = RoundedVideoDisplay(self.container)
         self.video_display.clicked.connect(lambda: self.media_listener.send_control("play_pause") if self.media_listener else None)
         self.video_display.artwork_ready.connect(self._on_hd_artwork_ready)
         self.video_display.video_frame_artwork_ready.connect(self._on_video_frame_artwork_ready)
-        self.content_row.addWidget(self.video_display, stretch=9)
 
-        layout.addLayout(self.content_row, stretch=1)
+        self.split_stage = SplitTransitionStage(self.lyrics_widget, self.video_display, self.container)
+        self.split_stage.set_callbacks(
+            on_progress=self._on_split_anim_progress,
+            on_finish=self._on_split_anim_finished,
+        )
+        layout.addWidget(self.split_stage, stretch=1)
+
+        # Floating "Video" toggle pill directly below the Mode dropdown (visible only in Mode 3 Karaoke)
+        self.btn_karaoke_video = QPushButton(" Video", self.container)
+        self.btn_karaoke_video.setObjectName("KaraokeVideoBtnActive")
+        self.btn_karaoke_video.setIcon(IconFactory.create_icon("film", "#09090b", 12))
+        self.btn_karaoke_video.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_karaoke_video.setToolTip("Bật / Tắt khung Video trong chế độ Karaoke")
+        self.btn_karaoke_video.clicked.connect(self.toggle_karaoke_video)
+        self.btn_karaoke_video.setVisible(False)
+        self.btn_karaoke_video.raise_()
 
         # ---------------------------------------------------------
         # 3. Media Controls Bar & Volume Control & Resizable Grip
@@ -781,14 +788,78 @@ class LyricOverlayWindow(QWidget):
         self.outer_layout.addWidget(self.container)
 
     # ---------------------------------------------------------
-    # Mode 1 & Mode 2 Switching + Adaptive Theme
+    # Mode 1, Mode 2 & Mode 3 (Karaoke) Switching + Animated Video Toggle
     # ---------------------------------------------------------
+    def _position_karaoke_video_btn(self):
+        if not hasattr(self, "btn_karaoke_video") or not hasattr(self, "btn_mode_dropdown"):
+            return
+        if self.display_mode != 3:
+            self.btn_karaoke_video.setVisible(False)
+            return
+        g = self.btn_mode_dropdown.geometry()
+        if g.width() <= 10:
+            return
+        btn_w = max(84, g.width())
+        self.btn_karaoke_video.setGeometry(g.x(), g.y() + g.height() + 5, btn_w, 24)
+        self.btn_karaoke_video.setVisible(True)
+        self.btn_karaoke_video.raise_()
+
+    def _update_karaoke_video_btn_style(self, accent_hex: str = None):
+        if not hasattr(self, "btn_karaoke_video"):
+            return
+        on = bool(self.karaoke_show_video)
+        self.btn_karaoke_video.setObjectName("KaraokeVideoBtnActive" if on else "KaraokeVideoBtn")
+        self.btn_karaoke_video.setIcon(IconFactory.create_icon("film", "#09090b" if on else "#f1f5f9", 12))
+        self.btn_karaoke_video.setToolTip(
+            "Video đang BẬT — Nhấn để tắt Video và đưa lời Karaoke vào chính giữa"
+            if on else "Video đang TẮT — Nhấn để hiện lại Video bên phải"
+        )
+        self.btn_karaoke_video.style().unpolish(self.btn_karaoke_video)
+        self.btn_karaoke_video.style().polish(self.btn_karaoke_video)
+
+    def toggle_karaoke_video(self):
+        if self.display_mode != 3:
+            return
+        self.karaoke_show_video = not self.karaoke_show_video
+        self.settings["karaoke_show_video"] = self.karaoke_show_video
+        self._update_karaoke_video_btn_style(self.adaptive_palette.get("accent_hex", "#38bdf8"))
+        if self.karaoke_show_video:
+            self._trigger_track_media_load()
+        # Animate first; stop video decoding ONLY after fade-out finishes inside _on_split_anim_finished!
+        self.split_stage.set_video_visible(self.karaoke_show_video, animate=True)
+        self.settings_autosave.emit(self.settings)
+
+    def _on_split_anim_progress(self, progress: float):
+        self._karaoke_align_p = float(progress)
+        if hasattr(self, "karaoke_widget"):
+            self.karaoke_widget.set_align_progress(progress)
+        if self.display_mode == 3:
+            align_flags = (
+                Qt.AlignmentFlag.AlignCenter
+                if progress >= 0.72
+                else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            )
+            for lbl in (
+                self.lbl_prev2, self.lbl_prev, self.lbl_active,
+                self.lbl_active_romaji, self.lbl_active_trans,
+                self.lbl_next, self.lbl_next2,
+            ):
+                if lbl.alignment() != align_flags:
+                    lbl.setAlignment(align_flags)
+
+    def _on_split_anim_finished(self, video_shown: bool):
+        if not video_shown and self.display_mode != 1:
+            # Stop MP4 video decoding AFTER fade-out animation completes to free CPU while preserving blurred backdrop
+            self.video_display.stop_video(clear_artwork=False)
+        self._position_karaoke_video_btn()
+        self._fit_active_lyric_fonts()
+
     def set_display_mode(self, mode: int):
-        mode = 1 if mode == 1 else 2
+        mode = mode if mode in (1, 2, 3) else 1
         if mode == self.display_mode:
             return
 
-        # Exit fullscreen before switching to Mode 2
+        # Exit fullscreen before switching to Mode 2 (Modes 1 & 3 both support fullscreen)
         if self.is_fullscreen and mode == 2:
             self.toggle_fullscreen(force_exit=True)
 
@@ -797,6 +868,10 @@ class LyricOverlayWindow(QWidget):
             if not self.is_fullscreen:
                 self.settings["mode1_w"] = self.width()
                 self.settings["mode1_h"] = self.height()
+        elif self.display_mode == 3:
+            if not self.is_fullscreen:
+                self.settings["mode3_w"] = self.width()
+                self.settings["mode3_h"] = self.height()
         else:
             if not self.is_compact:
                 self.settings["win_w"] = self.width()
@@ -805,8 +880,11 @@ class LyricOverlayWindow(QWidget):
         self.display_mode = mode
         self.settings["display_mode"] = mode
 
-        if self.display_mode == 1 and self.is_compact:
+        if self.display_mode in (1, 3) and self.is_compact:
             self.toggle_compact()
+
+        if hasattr(self, "sync_timer") and self.sync_timer:
+            self.sync_timer.setInterval(25 if self.display_mode == 3 else 50)
 
         self._apply_mode_layout(resize_window=True)
         self.apply_settings(self.settings)
@@ -832,8 +910,8 @@ class LyricOverlayWindow(QWidget):
         painter.end()
 
     def toggle_fullscreen(self, force_exit: bool = False):
-        """Toggle fullscreen in Mode 1 using exact screen geometry (prevents Windows DWM/Qt6 ghosting)."""
-        if self.display_mode != 1 and not force_exit:
+        """Toggle fullscreen in Mode 1 & Mode 3 using exact screen geometry (prevents Windows DWM/Qt6 ghosting)."""
+        if self.display_mode not in (1, 3) and not force_exit:
             return
 
         target_fs = False if force_exit else (not self.is_fullscreen)
@@ -871,6 +949,7 @@ class LyricOverlayWindow(QWidget):
         self.container.updateGeometry()
         self.container.update()
         self.update()
+        QTimer.singleShot(0, self._position_karaoke_video_btn)
         QTimer.singleShot(20, self.repaint)
 
     def keyPressEvent(self, event):
@@ -878,7 +957,7 @@ class LyricOverlayWindow(QWidget):
             self.toggle_fullscreen(force_exit=True)
             event.accept()
             return
-        if event.key() == Qt.Key.Key_F11 and self.display_mode == 1:
+        if event.key() == Qt.Key.Key_F11 and self.display_mode in (1, 3):
             self.toggle_fullscreen()
             event.accept()
             return
@@ -886,41 +965,66 @@ class LyricOverlayWindow(QWidget):
 
     def _apply_mode_layout(self, resize_window: bool = True):
         is_m1 = (self.display_mode == 1)
+        is_m2 = (self.display_mode == 2)
+        is_m3 = (self.display_mode == 3)
+        show_video_now = is_m1 or (is_m3 and self.karaoke_show_video)
 
-        # Toggle Mode buttons appearance
-        self.btn_mode1.setObjectName("ModeBtnActive" if is_m1 else "ModeBtn")
-        self.btn_mode2.setObjectName("ModeBtnActive" if not is_m1 else "ModeBtn")
-        self.btn_mode1.setIcon(IconFactory.create_icon("film", "#09090b" if is_m1 else "#ffffff", 13))
-        self.btn_mode2.setIcon(IconFactory.create_icon("align_center", "#09090b" if not is_m1 else "#ffffff", 13))
+        accent_hex = self.adaptive_palette.get("accent_hex", "#38bdf8")
+        self.btn_mode_dropdown.set_mode_state(self.display_mode, accent_hex)
+        self._update_karaoke_video_btn_style(accent_hex)
 
-        # Show/hide mode-specific widgets (blurred video backdrop & adaptive theme enabled in BOTH Mode 1 and Mode 2!)
-        self.video_display.setVisible(is_m1)
-        self.btn_fullscreen.setVisible(is_m1)
-        self.btn_zoom_out.setVisible(not is_m1)
-        self.btn_zoom_in.setVisible(not is_m1)
-        self.btn_compact.setVisible(not is_m1)
+        # Active line renderer: standard QLabel in Mode 1/2, word-by-word KaraokeLyricWidget in Mode 3
+        self.lbl_active.setVisible(not is_m3)
+        self.karaoke_widget.setVisible(is_m3)
+
+        # Show/hide mode-specific toolbar controls
+        self.btn_fullscreen.setVisible(is_m1 or is_m3)
+        self.btn_zoom_out.setVisible(is_m2)
+        self.btn_zoom_in.setVisible(is_m2)
+        self.btn_compact.setVisible(is_m2)
+        self.btn_karaoke_video.setVisible(is_m3)
         self.container.set_blurred_mode(True)
 
-        if is_m1:
-            self.setMinimumSize(620, 300)
-            if resize_window:
+        if hasattr(self, "sync_timer") and self.sync_timer:
+            self.sync_timer.setInterval(25 if is_m3 else 50)
+
+        # Give lyrics extra top breathing room in Mode 3 so floating "Video" pill never touches top lyrics
+        self.lyrics_box.setContentsMargins(4, 26 if is_m3 else 2, 4, 2)
+
+        # Apply instant stage layout on mode change (smooth animation is for Mode 3 Video toggle!)
+        self.split_stage.set_video_visible(show_video_now, animate=False)
+
+        self._suppress_resize_save = True
+        try:
+            if is_m1:
                 target_w = max(720, int(self.settings.get("mode1_w", 940)))
                 target_h = max(340, int(self.settings.get("mode1_h", 430)))
-                self.resize(target_w, target_h)
-            # Load full video stream + blurred theme for current track
-            self._trigger_track_media_load()
-        else:
-            self.setMinimumSize(280, 68)
-            # Stop MP4 video decoding to save CPU while keeping blurred backdrop & fetching HD artwork if needed
-            self.video_display.stop_video(clear_artwork=False)
-            if resize_window:
+                self.setMinimumSize(620, 300)
+                if resize_window and not self.is_fullscreen:
+                    self.resize(target_w, target_h)
+            elif is_m3:
+                target_w = max(680, int(self.settings.get("mode3_w", self.settings.get("mode1_w", 940))))
+                target_h = max(320, int(self.settings.get("mode3_h", self.settings.get("mode1_h", 430))))
+                self.setMinimumSize(540, 280)
+                if not show_video_now:
+                    self.video_display.stop_video(clear_artwork=False)
+                if resize_window and not self.is_fullscreen:
+                    self.resize(target_w, target_h)
+            else:
                 target_w = max(360, int(self.settings.get("win_w", 680)))
                 target_h = max(120, int(self.settings.get("win_h", 195)))
-                self.resize(target_w, target_h)
-            self._trigger_track_media_load()
+                self.setMinimumSize(280, 68)
+                self.video_display.stop_video(clear_artwork=False)
+                if resize_window:
+                    self.resize(target_w, target_h)
+        finally:
+            self._suppress_resize_save = False
 
-        # Refresh lyric line visibility & text
+        self._trigger_track_media_load()
+
+        # Refresh lyric line visibility, text & karaoke toggle button placement
         self._refresh_visible_lines()
+        QTimer.singleShot(0, self._position_karaoke_video_btn)
 
     def _reset_track_artwork(self, clear_display: bool = True):
         """Clears previous track's blurred background & adaptive palette cleanly on song change."""
@@ -964,10 +1068,11 @@ class LyricOverlayWindow(QWidget):
 
     def _trigger_track_media_load(self):
         """
-        Loads real YouTube HD video artwork (in Mode 2 artwork_only=True, zero video decoding)
-        or full synchronized video stream + HD artwork (in Mode 1).
+        Loads real YouTube HD video artwork (artwork_only=True when video pane is hidden, zero decoding)
+        or full synchronized video stream + HD artwork (Mode 1, and Mode 3 Karaoke when Video is ON).
         """
-        artwork_only = (self.display_mode != 1)
+        wants_video = (self.display_mode == 1) or (self.display_mode == 3 and self.karaoke_show_video)
+        artwork_only = not wants_video
         if self.current_thumb_bytes and self._artwork_priority >= 1 and self.container.bg_pixmap.isNull():
             self._update_adaptive_theme_from_source(self.current_thumb_bytes)
 
@@ -1134,7 +1239,7 @@ class LyricOverlayWindow(QWidget):
     def apply_settings(self, settings: dict):
         self.settings = settings
         new_mode = int(settings.get("display_mode", self.display_mode))
-        if new_mode in (1, 2) and new_mode != self.display_mode:
+        if new_mode in (1, 2, 3) and new_mode != self.display_mode:
             self.display_mode = new_mode
             self._apply_mode_layout(resize_window=True)
 
@@ -1144,17 +1249,20 @@ class LyricOverlayWindow(QWidget):
         align_mode = int(settings.get("align_mode", 0))
         line_mode = int(settings.get("line_mode", 1))
 
-        # Set Window Opacity: 100% solid (1.0) in Mode 1 Fullscreen, automatic bg_opacity when windowed!
-        if self.display_mode == 1 and self.is_fullscreen:
+        # Set Window Opacity: 100% solid (1.0) in Mode 1/3 Fullscreen, automatic bg_opacity when windowed!
+        if self.display_mode in (1, 3) and self.is_fullscreen:
             self.setWindowOpacity(1.0)
         else:
             self.setWindowOpacity(max(0.15, bg_opacity))
 
-        is_m1 = (self.display_mode == 1)
+        is_stage_mode = (self.display_mode in (1, 3))
 
-        if is_m1:
-            # Mode 1: Left-aligned lyrics with adaptive color matching the blurred video
-            align_flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        if is_stage_mode:
+            # Mode 1 & Mode 3 (Karaoke): Left-aligned when Video is ON, Centered when Mode 3 Video is OFF
+            if self.display_mode == 3 and not self.karaoke_show_video:
+                align_flags = Qt.AlignmentFlag.AlignCenter
+            else:
+                align_flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
             color_hi = self.adaptive_palette.get("active_color", "#7dd3fc")
             color_sub = self.adaptive_palette.get("sub_color", "rgba(255, 255, 255, 0.78)")
             color_far = self.adaptive_palette.get("far_color", "rgba(255, 255, 255, 0.42)")
@@ -1201,23 +1309,35 @@ class LyricOverlayWindow(QWidget):
             container_radius = "14px"
             active_font_size = font_size
 
-        for lbl in [
-            self.lbl_prev2, self.lbl_prev, self.lbl_active,
-            self.lbl_active_romaji, self.lbl_active_trans,
-            self.lbl_next, self.lbl_next2
-        ]:
-            lbl.setAlignment(align_flags)
+        if not getattr(self.split_stage, "_animating", False):
+            for lbl in [
+                self.lbl_prev2, self.lbl_prev, self.lbl_active,
+                self.lbl_active_romaji, self.lbl_active_trans,
+                self.lbl_next, self.lbl_next2
+            ]:
+                lbl.setAlignment(align_flags)
 
         # Multi-script font fallback stack for crisp Japanese, Korean, Chinese, Thai, Cyrillic & Vietnamese rendering
         font_stack = f"'{font_family}', 'Yu Gothic UI', 'Meiryo UI', 'Malgun Gothic', 'Microsoft YaHei UI', 'Leelawadee UI', 'Segoe UI', sans-serif"
+        families = [font_family, "Yu Gothic UI", "Meiryo UI", "Malgun Gothic", "Microsoft YaHei UI", "Leelawadee UI", "Segoe UI"]
         romaji_font_size = max(12, active_font_size - 3)
         trans_font_size = max(14, active_font_size - 1)
-        trans_gap_top = 16 if (is_m1 and self.is_fullscreen) else 10
+        trans_gap_top = 16 if (is_stage_mode and self.is_fullscreen) else 10
 
         self._base_active_font_size = active_font_size
         self._active_color_hi = color_hi
         self._active_font_stack = font_stack
         self._active_font_family = font_family
+
+        # Update Mode Dropdown & Karaoke Video toggle pill with live adaptive accent color
+        self.btn_mode_dropdown.set_mode_state(self.display_mode, accent_hex)
+        self._update_karaoke_video_btn_style(accent_hex)
+        if hasattr(self, "karaoke_widget"):
+            self.karaoke_widget.set_style(families, active_font_size, color_hi)
+            if not getattr(self.split_stage, "_animating", False):
+                self.karaoke_widget.set_align_progress(
+                    1.0 if (self.display_mode == 3 and not self.karaoke_show_video) else 0.0
+                )
 
         # Sync translate toggle icon state
         trans_enabled = bool(self.settings.get("enable_translation", True))
@@ -1271,27 +1391,32 @@ class LyricOverlayWindow(QWidget):
                 color: {color_far};
                 padding: 1px 0;
             }}
-            #ModeBtn {{
-                background-color: transparent;
-                color: rgba(255, 255, 255, 0.78);
-                border: none;
-                border-radius: 5px;
-                padding: 2px 9px;
+            #KaraokeVideoBtn {{
+                background-color: rgba(15, 23, 42, 0.68);
+                color: #f1f5f9;
+                border: 1px solid rgba(255, 255, 255, 0.24);
+                border-radius: 6px;
+                padding: 2px 8px;
                 font-size: 11px;
                 font-weight: bold;
             }}
-            #ModeBtn:hover {{
-                background-color: rgba(255, 255, 255, 0.14);
+            #KaraokeVideoBtn:hover {{
+                background-color: rgba(255, 255, 255, 0.20);
                 color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 0.42);
             }}
-            #ModeBtnActive {{
+            #KaraokeVideoBtnActive {{
                 background-color: {accent_hex};
                 color: #09090b;
-                border: none;
-                border-radius: 5px;
-                padding: 2px 9px;
+                border: 1px solid rgba(255, 255, 255, 0.22);
+                border-radius: 6px;
+                padding: 2px 8px;
                 font-size: 11px;
                 font-weight: bold;
+            }}
+            #KaraokeVideoBtnActive:hover {{
+                background-color: {accent_hex};
+                border: 1px solid rgba(255, 255, 255, 0.55);
             }}
             #ToolIconBtn {{
                 background-color: transparent;
@@ -1348,6 +1473,7 @@ class LyricOverlayWindow(QWidget):
         if hasattr(self, "slider_vol"):
             self.slider_vol.set_visual_state(muted=self.slider_vol._muted_visual, accent_hex=accent_hex)
         self._last_fit_style_key = None
+        QTimer.singleShot(0, self._position_karaoke_video_btn)
 
         # Refresh or start translation when settings change
         if self.current_lyrics:
@@ -1378,7 +1504,7 @@ class LyricOverlayWindow(QWidget):
     def _sync_surrounding_lines_visibility(self, has_foreign_sub: bool):
         """Keeps the 3-tier foreign subtitle layout uncluttered like an MV/Vietsub card."""
         line_mode = int(self.settings.get("line_mode", 1))
-        if self.display_mode == 1:
+        if self.display_mode in (1, 3):
             show_far = (not has_foreign_sub) or self.is_fullscreen
             self.lbl_prev2.setVisible(show_far)
             self.lbl_prev.setVisible(True)
@@ -1418,7 +1544,8 @@ class LyricOverlayWindow(QWidget):
         lw = self.lyrics_widget.width()
         lh = self.lyrics_widget.height()
         if lw <= 120:
-            lw = (self.width() - 56) if self.display_mode == 2 else max(260, (self.width() - 72) * 12 // 21)
+            is_full_w = (self.display_mode == 2) or (self.display_mode == 3 and not self.karaoke_show_video)
+            lw = (self.width() - 56) if is_full_w else max(260, (self.width() - 72) * 12 // 21)
         if lh <= 60:
             lh = max(84, self.height() - 108)
         avail_w = max(200, lw - 14)
@@ -1430,7 +1557,7 @@ class LyricOverlayWindow(QWidget):
         tr_vis = (not self.lbl_active_trans.isHidden()) and bool(self.lbl_active_trans.text())
         tr_text = self.lbl_active_trans.text() if tr_vis else ""
 
-        # Reserve vertical space for visible surrounding lines (prev/next in Mode 1 or tall Mode 2)
+        # Reserve vertical space for visible surrounding lines (prev/next in Mode 1/3 or tall Mode 2)
         reserved_h = 0
         sub_sz = max(12, base_sz - 6)
         f_sub = QFont()
@@ -1442,7 +1569,7 @@ class LyricOverlayWindow(QWidget):
                 sh = fm_sub.boundingRect(QRect(0, 0, avail_w, 2000), Qt.TextFlag.TextWordWrap, slbl.text()).height()
                 reserved_h += sh + 6
 
-        is_fs_m1 = (self.display_mode == 1 and self.is_fullscreen)
+        is_fs_m1 = (self.display_mode in (1, 3) and self.is_fullscreen)
         chosen = None
 
         for scale in (1.0, 0.92, 0.85, 0.78, 0.72, 0.66, 0.60, 0.54):
@@ -1502,6 +1629,8 @@ class LyricOverlayWindow(QWidget):
         self.lbl_active.setStyleSheet(
             f"font-family: {font_stack}; font-size: {sz_o}px; font-weight: bold; color: {color_hi}; padding: 2px 0 1px 0;"
         )
+        if hasattr(self, "karaoke_widget"):
+            self.karaoke_widget.set_style(families, sz_o, color_hi)
         self.lbl_active_romaji.setStyleSheet(
             f"font-family: {font_stack}; font-size: {sz_r}px; font-weight: 600; color: rgba(255, 255, 255, 0.92); letter-spacing: 0.3px; padding: 0 0 2px 0;"
         )
@@ -1643,6 +1772,8 @@ class LyricOverlayWindow(QWidget):
         if not media_state or not media_state.title:
             self.lbl_song_info.setText("Đang chờ phát nhạc...")
             self.lbl_active.setText("Chưa phát bài hát nào trên hệ thống Windows...")
+            if hasattr(self, "karaoke_widget"):
+                self.karaoke_widget.set_static_text("Chưa phát bài hát nào trên hệ thống Windows...")
             self.lbl_active_romaji.setText("")
             self.lbl_active_romaji.setVisible(False)
             self.lbl_active_trans.setText("")
@@ -1828,6 +1959,8 @@ class LyricOverlayWindow(QWidget):
             self.lbl_prev2.setText("")
             self.lbl_prev.setText("")
             self.lbl_active.setText(lines[0]["text"])
+            if hasattr(self, "karaoke_widget"):
+                self.karaoke_widget.set_lyric_line(lines, 0)
             self._update_active_translation_label(0)
             self.lbl_next.setText(lines[1]["text"] if len(lines) > 1 else "")
             self.lbl_next2.setText(lines[2]["text"] if len(lines) > 2 else "")
@@ -1847,6 +1980,11 @@ class LyricOverlayWindow(QWidget):
             self.lbl_prev.setText("")
             is_intro = bool(lines and lines[0]["time"] > 2.0 and self.current_media_state)
             self.lbl_active.setText("... (Nhạc dạo đầu) ..." if is_intro else lines[0]["text"])
+            if hasattr(self, "karaoke_widget"):
+                if is_intro:
+                    self.karaoke_widget.set_lyric_line([], -1, "... (Nhạc dạo đầu) ...")
+                else:
+                    self.karaoke_widget.set_lyric_line(lines, 0)
             self._update_active_translation_label(-1 if is_intro else 0)
             self.lbl_next.setText(lines[0]["text"] if is_intro else (lines[1]["text"] if len(lines) > 1 else ""))
             self.lbl_next2.setText(lines[1]["text"] if (is_intro and len(lines) > 1) else (lines[2]["text"] if len(lines) > 2 else ""))
@@ -1854,6 +1992,8 @@ class LyricOverlayWindow(QWidget):
             self.lbl_prev2.setText(lines[idx - 2]["text"] if idx >= 2 else "")
             self.lbl_prev.setText(lines[idx - 1]["text"] if idx > 0 else "... (Nhạc dạo đầu) ...")
             self.lbl_active.setText(lines[idx]["text"] if idx < len(lines) else "")
+            if hasattr(self, "karaoke_widget"):
+                self.karaoke_widget.set_lyric_line(lines, idx)
             self._update_active_translation_label(idx)
             self.lbl_next.setText(lines[idx + 1]["text"] if idx + 1 < len(lines) else "")
             self.lbl_next2.setText(lines[idx + 2]["text"] if idx + 2 < len(lines) else "")
@@ -1862,8 +2002,8 @@ class LyricOverlayWindow(QWidget):
         if not self.current_media_state:
             return
 
-        # Keep Mode 1 video smoothly synced with Chrome / GSMTC playback
-        if self.display_mode == 1:
+        # Keep video smoothly synced in Mode 1 and Mode 3 (Karaoke when Video is ON)
+        if self.display_mode == 1 or (self.display_mode == 3 and self.karaoke_show_video):
             raw_pos = self.current_media_state.get_current_position()
             self.video_display.sync_to_media(raw_pos, self.current_media_state.is_playing)
 
@@ -1878,7 +2018,10 @@ class LyricOverlayWindow(QWidget):
         if not synced:
             self.lbl_prev2.setText("")
             self.lbl_prev.setText("")
-            self.lbl_active.setText(lines[0]["text"] if lines else "")
+            first_txt = lines[0]["text"] if lines else ""
+            self.lbl_active.setText(first_txt)
+            if hasattr(self, "karaoke_widget"):
+                self.karaoke_widget.set_static_text(first_txt)
             self._update_active_translation_label(-1)
             self.lbl_next.setText("")
             self.lbl_next2.setText("")
@@ -1912,9 +2055,18 @@ class LyricOverlayWindow(QWidget):
             self.lbl_prev2.setText(prev2_text)
             self.lbl_prev.setText(prev_text)
             self.lbl_active.setText(active_text)
+            if hasattr(self, "karaoke_widget"):
+                if active_idx == -1:
+                    self.karaoke_widget.set_lyric_line([], -1, "... (Nhạc dạo đầu) ...")
+                else:
+                    self.karaoke_widget.set_lyric_line(lines, active_idx)
             self._update_active_translation_label(active_idx)
             self.lbl_next.setText(next_text)
             self.lbl_next2.setText(next2_text)
+
+        # Feed real-time song position on every tick so Mode 3 Karaoke lights up word-by-word at exact tempo
+        if self.display_mode == 3 and hasattr(self, "karaoke_widget"):
+            self.karaoke_widget.set_playback_time(current_time)
 
     def jump_to_prev_line(self):
         if not self.current_lyrics or not self.current_lyrics.get("lines"):
@@ -1963,6 +2115,9 @@ class LyricOverlayWindow(QWidget):
         self.lbl_prev2.setText(lines[target_idx - 2]["text"] if target_idx >= 2 else "")
         self.lbl_prev.setText(lines[target_idx - 1]["text"] if target_idx > 0 else "")
         self.lbl_active.setText(lines[target_idx]["text"])
+        if hasattr(self, "karaoke_widget"):
+            self.karaoke_widget.set_lyric_line(lines, target_idx)
+            self.karaoke_widget.set_playback_time(target_time)
         self._update_active_translation_label(target_idx)
         self.lbl_next.setText(lines[target_idx + 1]["text"] if target_idx + 1 < len(lines) else "")
         self.lbl_next2.setText(lines[target_idx + 2]["text"] if target_idx + 2 < len(lines) else "")
@@ -2074,7 +2229,7 @@ class LyricOverlayWindow(QWidget):
             self.bt_pill.setVisible(True)
 
     def toggle_compact(self):
-        if self.display_mode == 1:
+        if self.display_mode != 2:
             return
         self.is_compact = not self.is_compact
         if self.is_compact:
@@ -2146,7 +2301,12 @@ class LyricOverlayWindow(QWidget):
             delta = global_pos - self.press_global_pos
             geom = self.press_geom
 
-            min_w, min_h = (620, 300) if self.display_mode == 1 else (280, 68)
+            if self.display_mode == 1:
+                min_w, min_h = 620, 300
+            elif self.display_mode == 3:
+                min_w, min_h = 540, 280
+            else:
+                min_w, min_h = 280, 68
             new_x, new_y, new_w, new_h = geom.x(), geom.y(), geom.width(), geom.height()
 
             if "right" in self.active_edge:
@@ -2231,16 +2391,21 @@ class LyricOverlayWindow(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(0, self._fit_active_lyric_fonts)
+        QTimer.singleShot(0, self._position_karaoke_video_btn)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if not self.is_fullscreen:
+        if not self.is_fullscreen and not getattr(self, "_suppress_resize_save", False):
             if self.display_mode == 1:
                 self.settings["mode1_w"] = self.width()
                 self.settings["mode1_h"] = self.height()
+            elif self.display_mode == 3:
+                self.settings["mode3_w"] = self.width()
+                self.settings["mode3_h"] = self.height()
             elif not self.is_compact:
                 self.settings["win_w"] = self.width()
                 self.settings["win_h"] = self.height()
+        self._position_karaoke_video_btn()
         if hasattr(self, "lbl_active_trans") and hasattr(self, "lbl_active_romaji"):
             has_sub = bool(self.lbl_active_trans.text() or self.lbl_active_romaji.text()) and not self.is_compact and bool(self.settings.get("enable_translation", True))
             self._sync_surrounding_lines_visibility(has_foreign_sub=has_sub)
@@ -2259,6 +2424,9 @@ class LyricOverlayWindow(QWidget):
         if self.display_mode == 1:
             self.settings["mode1_w"] = self.width()
             self.settings["mode1_h"] = self.height()
+        elif self.display_mode == 3:
+            self.settings["mode3_w"] = self.width()
+            self.settings["mode3_h"] = self.height()
         elif not self.is_compact:
             self.settings["win_w"] = self.width()
             self.settings["win_h"] = self.height()

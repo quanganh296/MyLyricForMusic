@@ -42,7 +42,8 @@ DEFAULT_SETTINGS = {
     "color_highlight": "#38bdf8",
     "color_sub": "#94a3b8",
     "bg_opacity": 0.75,
-    "display_mode": 1,   # 1: Video (Right) + Lyrics (Left) + Blurred BG, 2: Lyric-Only Centered
+    "display_mode": 1,   # 1: Video + Lyrics, 2: Lyric-Only Centered, 3: Karaoke (word-by-word + video toggle)
+    "karaoke_show_video": True,
     "enable_translation": True,
     "enable_romanization": True,
     "translate_lang": "vi",
@@ -54,7 +55,9 @@ DEFAULT_SETTINGS = {
     "win_w": 680,
     "win_h": 220,
     "mode1_w": 940,
-    "mode1_h": 430
+    "mode1_h": 430,
+    "mode3_w": 940,
+    "mode3_h": 430
 }
 
 def load_settings() -> dict:
@@ -157,6 +160,9 @@ class LyricOverlayApp:
             if self.overlay.display_mode == 1:
                 self.settings["mode1_w"] = self.overlay.width()
                 self.settings["mode1_h"] = self.overlay.height()
+            elif self.overlay.display_mode == 3:
+                self.settings["mode3_w"] = self.overlay.width()
+                self.settings["mode3_h"] = self.overlay.height()
             elif not self.overlay.is_compact:
                 self.settings["win_w"] = self.overlay.width()
                 self.settings["win_h"] = self.overlay.height()

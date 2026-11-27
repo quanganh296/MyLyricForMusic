@@ -129,6 +129,7 @@ class RoundedVideoDisplay(QWidget):
         self.fallback_pixmap = QPixmap()
         self.status_text = ""
         self.border_color = QColor(255, 255, 255, 65)
+        self._render_opacity = 1.0
 
         self.current_req_key = None
         self.resolver = None
@@ -165,6 +166,12 @@ class RoundedVideoDisplay(QWidget):
         if isinstance(rgba_str_or_qcolor, QColor):
             self.border_color = rgba_str_or_qcolor
         self.update()
+
+    def set_render_opacity(self, alpha: float):
+        alpha = max(0.0, min(1.0, float(alpha)))
+        if abs(alpha - self._render_opacity) > 0.002:
+            self._render_opacity = alpha
+            self.update()
 
     def set_fallback_artwork(self, img_bytes: bytes):
         if img_bytes:
@@ -357,7 +364,11 @@ class RoundedVideoDisplay(QWidget):
         super().mousePressEvent(event)
 
     def paintEvent(self, event):
+        if self._render_opacity <= 0.005:
+            return
         painter = QPainter(self)
+        if self._render_opacity < 0.995:
+            painter.setOpacity(self._render_opacity)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 

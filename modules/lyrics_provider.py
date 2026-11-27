@@ -28,10 +28,19 @@ class LyricsProvider:
 
         lines = []
         pattern = re.compile(r'\[(\d+):(\d+)(?:[\.\:](\d+))?\]')
-        inline_ts_pattern = re.compile(r'<\d+:\d+(?:[\.\:]\d+)?>')
+        inline_ts_pattern = re.compile(r'<(\d+):(\d+)(?:[\.\:](\d+))?>')
         
         has_timestamps = False
         raw_lines = lrc_text.splitlines()
+
+        def _parse_ts(m_grp1, m_grp2, m_grp3) -> float:
+            minutes = int(m_grp1)
+            seconds = int(m_grp2)
+            if m_grp3:
+                fraction = int(m_grp3) / 1000.0 if len(m_grp3) == 3 else int(m_grp3) / (10 ** len(m_grp3))
+            else:
+                fraction = 0.0
+            return minutes * 60 + seconds + fraction
 
         for raw_line in raw_lines:
             raw_line = raw_line.strip()
@@ -41,24 +50,34 @@ class LyricsProvider:
             matches = list(pattern.finditer(raw_line))
             if matches:
                 has_timestamps = True
-                text = pattern.sub('', raw_line)
-                text = inline_ts_pattern.sub('', text)
+                raw_after_line_ts = pattern.sub('', raw_line)
+
+                # Extract Enhanced LRC word-level timestamps (<mm:ss.xx>word) if present!
+                inline_matches = list(inline_ts_pattern.finditer(raw_after_line_ts))
+                parsed_words = None
+                if inline_matches:
+                    parsed_words = []
+                    # Any prefix before first inline tag uses line start timestamp
+                    prefix_txt = raw_after_line_ts[:inline_matches[0].start()]
+                    if prefix_txt:
+                        parsed_words.append({"time": _parse_ts(matches[0].group(1), matches[0].group(2), matches[0].group(3)), "text": prefix_txt})
+                    for idx_im, im in enumerate(inline_matches):
+                        w_time = _parse_ts(im.group(1), im.group(2), im.group(3))
+                        seg_end = inline_matches[idx_im + 1].start() if idx_im + 1 < len(inline_matches) else len(raw_after_line_ts)
+                        w_txt = raw_after_line_ts[im.end():seg_end]
+                        if w_txt:
+                            parsed_words.append({"time": w_time, "text": w_txt})
+
+                text = inline_ts_pattern.sub('', raw_after_line_ts)
                 text = re.sub(r'\s+', ' ', text).strip()
                 if not text:
                     continue
                 for m in matches:
-                    minutes = int(m.group(1))
-                    seconds = int(m.group(2))
-                    frac_str = m.group(3)
-                    if frac_str:
-                        if len(frac_str) == 3:
-                            fraction = int(frac_str) / 1000.0
-                        else:
-                            fraction = int(frac_str) / (10 ** len(frac_str))
-                    else:
-                        fraction = 0.0
-                    time_in_sec = minutes * 60 + seconds + fraction
-                    lines.append({"time": time_in_sec, "text": text})
+                    time_in_sec = _parse_ts(m.group(1), m.group(2), m.group(3))
+                    entry = {"time": time_in_sec, "text": text}
+                    if parsed_words and len(matches) == 1:
+                        entry["words"] = parsed_words
+                    lines.append(entry)
 
         if has_timestamps and lines:
             lines.sort(key=lambda x: x["time"])

@@ -1,5 +1,10 @@
 # Lịch sử cập nhật LyricNow
 
+## v1.1.1
+- **Nút chọn chế độ dạng menu thả xuống (Dropdown):** Gộp nút chọn chế độ thành 1 ô gọn đẹp có mũi tên chỉ xuống bên phải, bấm vào sẽ thả danh sách chọn giữa **Video (Mode 1)**, **Lyric (Mode 2)** và **Karaoke (Mode 3)**.
+- **Thêm Mode 3 — Hát Karaoke sáng chữ từng từ khớp nhịp:** Chữ chưa hát luôn nhạt màu, hát tới từ nào sẽ sáng màu quét mượt từ trái sang phải theo đúng nhịp bài hát — tự động nhận diện nhịp chậm (ballad) lẫn nhịp nhanh (rap) và hỗ trợ dấu phẩy/ngắt nghỉ tự nhiên cũng như LRC timestamp từng từ.
+- **Nút bật/tắt `Video` riêng ngay dưới nút chọn Mode + Hiệu ứng chuyển cảnh mượt mà:** Khi tắt Video trong Mode 3, khung Video trượt nhanh sang trái và mờ dần biến mất, còn phần Lyric trượt mượt sang phải rồi tự căn dừng đúng chính giữa màn hình (và đảo chiều mượt mà khi bật lại Video).
+
 ## v1.1.0
 - **Thanh công cụ tối giản chuẩn Windows 11 với hiệu ứng di chuột mượt mà:** Bỏ toàn bộ viền/khung nút thô trên thanh công cụ — ở trạng thái thường các biểu tượng hiển thị gọn nhẹ trong suốt; khi di chuột vào nút nào sẽ nổi nền tương ứng, riêng nút đóng **`X`** đổi nền **đỏ (`#e81123`)** cùng dấu **`X` màu trắng** sắc nét.
 - **Bổ sung cụm nút điều khiển cửa sổ (`—` Thu nhỏ, `□`/`❐` Phóng to / Thu gọn, `✕` Đóng):** Hỗ trợ thu nhỏ cửa sổ xuống thanh tác vụ và biểu tượng vector nét mảnh đồng bộ trên cả Mode 1 và Mode 2.
